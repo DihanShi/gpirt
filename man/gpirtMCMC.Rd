@@ -8,11 +8,17 @@ gpirtMCMC(
   data,
   sample_iterations,
   burn_iterations,
+  THIN = 1,
+  CHAIN = 1,
   vote_codes = list(yea = 1:3, nay = 4:6, missing = c(0, 7:9, NA)),
   beta_prior_means = matrix(0, nrow = 2, ncol = ncol(data)),
   beta_prior_sds = matrix(3, nrow = 2, ncol = ncol(data)),
-  beta_proposal_sds = matrix(0.1, nrow = 2, ncol = ncol(data)),
-  theta_init = NULL
+  theta_os = 1,
+  theta_ls = 10,
+  theta_init = NULL,
+  thresholds = NULL,
+  SEED = 1,
+  constant_IRF = 0
 )
 }
 \arguments{
@@ -25,11 +31,18 @@ of samples to record}
 \item{burn_iterations}{An integer vector of length one giving the number of
 burn in (unrecorded) iterations}
 
+\item{THIN}{An integer giving the number of
+thins per sample iterations}
+
+\item{CHAIN}{An integer giving the number of
+chains}
+
 \item{vote_codes}{A named list giving the mapping from recorded responses to
 {-1, 1, NA}. An element named "yea" gives the responses that should be
 coded as 1, an element named "nay" gives the responses that should be coded
 as -1, and an element named "missing" gives responses that should be NA;
-only used if \code{data} must be coerced to a \code{response_matrix} object}
+only used if \code{data} must be coerced to a \code{response_matrix} object.
+If NULL, then ordinal regression will be performed.}
 
 \item{beta_prior_means}{A numeric matrix of with \code{ncol(data)} columns
 and two rows giving the prior means for the items' linear means' intercept
@@ -39,13 +52,21 @@ and slope; by default, a matrix of zeros}
 and two rows giving the prior standard deviations for the items' linear
 means' intercept and slope; by default, a matrix of threes}
 
-\item{beta_proposal_sds}{A numeric matrix of with \code{ncol(data)} columns
-and two rows giving the standard deviations for proposals for the items'
-linear means' intercept and slope; by default a matrix filled with 0.1}
+\item{theta_os}{A numeric value giving output scale of dynamic ability GP model}
+
+\item{theta_ls}{A numeric value giving length scale of dynamic ability GP model}
 
 \item{theta_init}{A vector of length \code{nrow(data)} giving initial values
 for the respondent ideology parameters; if NULL (the default), the initial
 values are drawn from the parameters' prior distributions.}
+
+\item{thresholds}{A vector of length \code{C+1} where \code{C} is the number
+of all categories; if NULL (the default), the values are chosen from -Inf to Inf
+ of length \code{C+1} with each y having equal probablity under prior mean.}
+
+\item{constant_IRF}{A binary indicator of whether IRFs are constant over time}
+
+\item{seed}{An integar giving the random seed}
 }
 \value{
 A list with elements

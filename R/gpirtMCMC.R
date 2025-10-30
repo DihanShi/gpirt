@@ -8,23 +8,36 @@
 #'   of samples to record
 #' @param burn_iterations An integer vector of length one giving the number of
 #'   burn in (unrecorded) iterations
+#' @param THIN An integer giving the number of
+#'   thins per sample iterations
+#' @param CHAIN An integer giving the number of
+#'   chains
 #' @param vote_codes A named list giving the mapping from recorded responses to
 #'   {-1, 1, NA}. An element named "yea" gives the responses that should be
 #'   coded as 1, an element named "nay" gives the responses that should be coded
 #'   as -1, and an element named "missing" gives responses that should be NA;
-#'   only used if \code{data} must be coerced to a \code{response_matrix} object
+#'   only used if \code{data} must be coerced to a \code{response_matrix} object.
+#'   If NULL, then ordinal regression will be performed.
 #' @param beta_prior_means A numeric matrix of with \code{ncol(data)} columns
 #'   and two rows giving the prior means for the items' linear means' intercept
 #'   and slope; by default, a matrix of zeros
 #' @param beta_prior_sds A numeric matrix of with \code{ncol(data)} columns
 #'   and two rows giving the prior standard deviations for the items' linear
 #'   means' intercept and slope; by default, a matrix of threes
-#' @param beta_proposal_sds A numeric matrix of with \code{ncol(data)} columns
-#'   and two rows giving the standard deviations for proposals for the items'
-#'   linear means' intercept and slope; by default a matrix filled with 0.1
+#' @param theta_prior_means A numeric  matrix of with \code{ncol(data)} columns
+#' giving the prior mean of theta by default, a  matrix of zeros
+#' @param theta_prior_sds A numeric  matrix of with \code{ncol(data)} columns
+#'  giving sd of prior variance constant theta; by default, a  matrix of ones
+#' @param theta_os A numeric value giving output scale of dynamic ability GP model
+#' @param theta_ls A numeric value giving length scale of dynamic ability GP model
 #' @param theta_init A vector of length \code{nrow(data)} giving initial values
 #'   for the respondent ideology parameters; if NULL (the default), the initial
 #'   values are drawn from the parameters' prior distributions.
+#' @param thresholds A vector of length \code{C+1} where \code{C} is the number
+#'   of all categories; if NULL (the default), the values are chosen from -Inf to Inf
+#'    of length \code{C+1} with each y having equal probablity under prior mean.
+#' @param seed An integar giving the random seed
+#' @param constant_IRF A binary indicator of whether IRFs are constant over time
 #'
 #' @return A list with elements
 #'   \describe{
@@ -83,23 +96,70 @@
 #'
 #' @export
 gpirtMCMC <- function(data, sample_iterations, burn_iterations,
+                      THIN=1, CHAIN=1,
                       vote_codes = list(yea = 1:3, nay = 4:6,
                                         missing = c(0, 7:9, NA)),
-                      beta_prior_means = matrix(0, nrow = 2, ncol = ncol(data)),
-                      beta_prior_sds = matrix(3, nrow = 2, ncol = ncol(data)),
-                      beta_proposal_sds = matrix(0.1, nrow = 2, ncol = ncol(data)),
-                      theta_init = NULL) {
-    # First we make sure our data are in the proper format:
-    data <- as.response_matrix(data, vote_codes)
-    # Now we make sure we have initial values for theta
-    if ( is.null(theta_init) ) {
-        theta_init  <- rnorm(nrow(data))
+                      beta_prior_means = matrix(0, nrow = 3, ncol = ncol(data)),
+                      beta_prior_sds = matrix(3, nrow = 3, ncol = ncol(data)),
+                      theta_prior_means = matrix(0, nrow = 2, ncol = nrow(data)),
+                      theta_prior_sds = matrix(0, nrow = 2, ncol = nrow(data)),
+                      theta_os = 1, theta_ls = 10, KERNEL = "Matern",
+                      theta_init = NULL, thresholds = NULL, SEED=1, constant_IRF=0) {
+    # Setup result list for multiple chains
+    result = list()
+    for(chain in 1:CHAIN){
+        # Set seed for each chain
+        set.seed(SEED+chain-1);
+        # First we make sure our data are in the proper format:
+        if ( !is.null(vote_codes) ){
+            data <- as.response_matrix(data, vote_codes)
+        }  
+        
+        # Now we make sure we have initial values for theta
+        if ( is.null(theta_init) ) {
+            # initial theta as # of respondents by # of sessions
+            theta_init <- matrix(0, nrow=nrow(data), ncol=dim(data)[3])
+            for(i in 1:nrow(data)){
+                theta_init[i,1] <- rnorm(1, theta_prior_means[1,i],theta_prior_sds[1,i])
+            }
+            
+            if(dim(data)[3]>=2){
+                for(h in 2:dim(data)[3]){
+                        theta_init[,h] <- theta_init[,1]
+                }
+            }
+            
+        }
+
+        # Now we make sure we have initial values for thresholds
+        if ( is.null(thresholds) ) {
+            if(is.matrix(data)){
+                unique_ys = unique(data)
+            }else{
+                n = dim(data)[1]
+                m = dim(data)[2]
+                horizon = dim(data)[3]
+                unique_ys = unique(array(data, n*m*horizon))
+            }   
+            C = length(unique(unique_ys[!is.na(unique_ys)]))
+            thresholds <- array(array(0, m*horizon*(C+1)), c(m,C+1,horizon))
+            for(j in 1:m){
+                thresholds[j,1,] <- -Inf
+                for(i in 1:(C-1)){
+                    thresholds[j,1+i,] = qnorm(i/C, 0, 1, 1, 0)
+                }
+                thresholds[j,C+1,] = Inf
+            }
+        }
+
+        # Now we can call the C++ sampler function
+        result[[chain]] <- .gpirtMCMC(
+            data, theta_init, sample_iterations, burn_iterations, THIN,
+            beta_prior_means, beta_prior_sds,
+            theta_prior_means, theta_prior_sds,
+            theta_os, theta_ls, KERNEL, thresholds, constant_IRF
+        )
     }
-    # Now we can call the C++ sampler function
-    result <- .gpirtMCMC(
-        data, theta_init, sample_iterations, burn_iterations,
-        beta_prior_means, beta_prior_sds, beta_proposal_sds
-    )
     # And return the result
     return(result)
 }
