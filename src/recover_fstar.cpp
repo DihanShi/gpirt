@@ -18,11 +18,19 @@ Rcpp::List recover_fstar(int seed,
     arma::uword m = f.n_cols;
     arma::uword horizon = f.n_slices;
 
+    // Create sparsity masks for this function
+    arma::field<arma::uvec> obs_persons(m, horizon);
+    for (arma::uword h = 0; h < horizon; ++h) {
+        for (arma::uword j = 0; j < m; ++j) {
+            obs_persons(j, h) = arma::find_finite(y.slice(h).col(j));
+        }
+    }
+
     // set up S
     arma::cube S = arma::zeros<arma::cube>(n, n, horizon);
     for (arma::uword h = 0; h < horizon; h++)
     {
-        S.slice(h) = K(theta.col(h), theta.col(h),beta_prior_sds.col(0));
+        S.slice(h) = K(theta.col(h), theta.col(h), beta_prior_sds.col(0));
         S.slice(h).diag() += 1e-6;
     }
 
@@ -51,18 +59,16 @@ Rcpp::List recover_fstar(int seed,
     // set up cholS
     arma::cube cholS(n, n, horizon);
     for (arma::uword h = 0; h < horizon; h++){
-        for ( arma::uword j = 0; j < m; ++j ) {
-            cholS.slice(h) = arma::chol(S.slice(h)+ \
-                        X.slice(h)*arma::diagmat(square(beta_prior_sds.col(j)))* \
-                        X.slice(h).t(), "lower");
-            // cholS.slice(h) = arma::chol(S.slice(h), "lower");
-        }
+        cholS.slice(h) = arma::chol(S.slice(h), "lower");
     }
+    
     // restore seed
     set_seed(seed);
-    f = draw_f(f, theta, y, cholS,beta_prior_sds, mu, thresholds, constant_IRF);
-    arma::cube f_star = draw_fstar(f, theta, theta_star,beta_prior_sds, cholS,  mu_star, constant_IRF);
+    
+    // Use sparse version of draw_f
+    f = draw_f(f, theta, y, cholS, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons);
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
+    
     Rcpp::List result = Rcpp::List::create(Rcpp::Named("fstar", f_star));
-
     return result;
 }
