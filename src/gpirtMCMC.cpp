@@ -146,8 +146,8 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
     }
     
-    // Setup theta_star grid
-    arma::vec theta_star = arma::regspace<arma::vec>(-5.0, 0.01, 5.0);
+    // Setup theta_star grid - CHANGED FROM 0.01 TO 0.1
+    arma::vec theta_star = arma::regspace<arma::vec>(-5.0, 0.1, 5.0);  // NOW 101 POINTS
     arma::uword N = theta_star.n_elem;
     arma::mat Xstar(N, 3);
     Xstar.col(0) = arma::ones<arma::vec>(N);
@@ -159,7 +159,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     }
     
     arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
-    Rcpp::Rcout << "start running gpirtMCMC...\n";
+    Rcpp::Rcout << "start running gpirtMCMC with grid size 0.1 (" << N << " grid points)...\n";
 
     // Setup results storage
     arma::cube              theta_draws(int(sample_iterations/THIN), n, y.n_slices);
@@ -194,8 +194,8 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         X.col(1) = theta;
         X.col(2) = arma::pow(theta, 2);
 
-        // Update f for new theta
-        arma::mat idx = (theta+5)/0.01;
+        // Update f for new theta - ADJUSTED FOR 0.1 GRID
+        arma::mat idx = (theta+5)/0.1;  // CHANGED FROM 0.01 TO 0.1
         for (arma::uword k = 0; k < n; ++k){
             for (arma::uword h = 0; h < horizon; ++h){
                 f.slice(h).row(k) = f_star.slice(h).row(round(idx(k, h)));

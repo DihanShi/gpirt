@@ -7,13 +7,13 @@ inline double compute_ll_sparse(const double theta,
                                 const arma::mat& mu_star,
                                 const arma::mat& thresholds,
                                 const arma::uvec& obs_idx){
-    // round nu to the nearest index grid
-    int theta_index = round((theta+5)/0.01);
+    // round nu to the nearest index grid - ADJUSTED FOR 0.1 GRID
+    int theta_index = round((theta+5)/0.1);  // CHANGED FROM 0.01 TO 0.1
     if(theta_index<0){
         theta_index = 0;
-    }else if (theta_index>1001)
+    }else if (theta_index>101)  // CHANGED FROM 1001 TO 101
     {
-        theta_index=1001;
+        theta_index=101;  // CHANGED FROM 1001 TO 101
     }
     
     // Extract only observed items
@@ -135,8 +135,9 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 arma::chol(V+std::pow(theta_prior_sds(0,i),2), "lower"), 
                 fstar_, mu_star_, thresholds, obs_items_i);
                 
+            // ADJUSTED FOR 0.1 GRID
             for ( arma::uword h = 0; h < horizon; ++h ){
-                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
+                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.1)];  // CHANGED FROM 0.01 TO 0.1
             }
         }
     }else if(ls<=0.1){
@@ -159,7 +160,8 @@ arma::mat draw_theta(const arma::vec& theta_star,
                     arma::chol(V+std::pow(theta_prior_sds(0,i),2), "lower"), 
                     fstar_, mu_star_, thresholds, obs_items_i);
                     
-                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
+                // ADJUSTED FOR 0.1 GRID    
+                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.1)];  // CHANGED FROM 0.01 TO 0.1
             }
         }
     }else{
@@ -178,8 +180,9 @@ arma::mat draw_theta(const arma::vec& theta_star,
             arma::vec raw_theta_ess = draw_theta_ess_sparse(theta.row(i).t(), y.row(i), 
                                                            L, fstar, mu_star, thresholds,
                                                            obs_items_i);
+            // ADJUSTED FOR 0.1 GRID
             for ( arma::uword h = 0; h < horizon; ++h ){
-                result(i, h) = theta_star[round((raw_theta_ess(h)+5)/0.01)];
+                result(i, h) = theta_star[round((raw_theta_ess(h)+5)/0.1)];  // CHANGED FROM 0.01 TO 0.1
             }
         }
     }

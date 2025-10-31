@@ -45,8 +45,8 @@ Rcpp::List recover_fstar(int seed,
         mu.slice(h) = X.slice(h) * beta.slice(h);
     }
 
-    // set up mu_star
-    arma::vec theta_star = arma::regspace<arma::vec>(-5.0, 0.01, 5.0);
+    // set up mu_star - ADJUSTED FOR 0.1 GRID
+    arma::vec theta_star = arma::regspace<arma::vec>(-5.0, 0.1, 5.0);  // CHANGED FROM 0.01 TO 0.1
     arma::uword N = theta_star.n_elem;
     arma::mat Xstar(N, 2);
     Xstar.col(0) = arma::ones<arma::vec>(N);
