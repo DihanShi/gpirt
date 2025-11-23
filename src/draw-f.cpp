@@ -1,15 +1,17 @@
 #include "gpirt.h"
+#include "mvnormal.h"
 #include "iterative_solvers.h"
 
-// ESS with iterative methods and pre-allocated workspace
+// ESS with iterative MVN sampling
 arma::vec ess_iterative(const arma::vec& f, const arma::vec& y, 
-                        const arma::mat& K, const arma::vec& mu, 
-                        const arma::vec& thresholds, const arma::uvec& obs_idx,
-                        IterativeWorkspace& work) {
+                        const arma::mat& S,  // Covariance matrix
+                        const arma::vec& mu, const arma::vec& thresholds,
+                        const arma::uvec& obs_idx,
+                        IterativeWorkspace& ws) {  // Pre-allocated workspace
     arma::uword n = f.n_elem;
     
-    // Use Lanczos for sampling from N(0, K)
-    work.nu = lanczos_mvn_sample(K, work, 40);  // 40 Lanczos iterations usually sufficient
+    // Use Lanczos for sampling instead of Cholesky
+    arma::vec nu = lanczos_mvn_sample(S, ws.z, ws.Q, ws.alpha, ws.beta, 30);
     
     double u = R::runif(0.0, 1.0);
     double log_y = ll_bar_sparse(f, y, mu, thresholds, obs_idx) + std::log(u);
@@ -20,11 +22,12 @@ arma::vec ess_iterative(const arma::vec& f, const arma::vec& y,
     double epsilon = R::runif(epsilon_min, epsilon_max);
     epsilon_min = epsilon - M_2PI;
     
+    // Use pre-allocated vector
+    arma::vec& f_prime = ws.v;  // Reuse workspace vector
+    
     while (reject) {
-        // Use pre-allocated workspace
-        work.f_prime = f * std::cos(epsilon) + work.nu * std::sin(epsilon);
-        
-        if (ll_bar_sparse(work.f_prime, y, mu, thresholds, obs_idx) > log_y) {
+        f_prime = f * std::cos(epsilon) + nu * std::sin(epsilon);
+        if (ll_bar_sparse(f_prime, y, mu, thresholds, obs_idx) > log_y) {
             reject = false;
         } else {
             if (epsilon < 0.0) {
@@ -35,23 +38,22 @@ arma::vec ess_iterative(const arma::vec& f, const arma::vec& y,
             epsilon = R::runif(epsilon_min, epsilon_max);
         }
     }
-    return work.f_prime;
+    return f_prime;
 }
 
 // Updated draw_f_ to use iterative ESS
 inline arma::mat draw_f_(const arma::mat& f, const arma::mat& y, 
-                        const arma::mat& K, const arma::mat& mu, 
-                        const arma::mat& thresholds,
+                        const arma::mat& S,
+                        const arma::mat& mu, const arma::mat& thresholds,
                         const arma::field<arma::uvec>& obs_persons_h,
                         arma::field<IterativeWorkspace>& workspaces) {
     arma::uword n = f.n_rows;
     arma::uword m = f.n_cols;
     arma::mat result(n, m);
     
-    // Parallel loop over items (if OpenMP enabled)
     #pragma omp parallel for schedule(dynamic)
     for (arma::uword j = 0; j < m; ++j) {
-        result.col(j) = ess_iterative(f.col(j), y.col(j), K, mu.col(j), 
+        result.col(j) = ess_iterative(f.col(j), y.col(j), S, mu.col(j), 
                                      thresholds.row(j).t(), obs_persons_h(j),
                                      workspaces(j));
     }
@@ -59,7 +61,7 @@ inline arma::mat draw_f_(const arma::mat& f, const arma::mat& y,
 }
 
 arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
-                  const arma::cube& K,  // Now K instead of cholS
+                  const arma::cube& S,  // Now S instead of cholS
                   const arma::mat& beta_prior_sds, 
                   const arma::cube& mu, const arma::cube& thresholds, 
                   const int constant_IRF,
@@ -70,24 +72,24 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
     arma::uword horizon = f.n_slices;
     arma::cube result(n, m, horizon);
 
-    if(constant_IRF == 0) {
-        // Non-constant IRF
-        for (arma::uword h = 0; h < horizon; ++h) {
+    if(constant_IRF==0){
+        for (arma::uword h = 0; h < horizon; ++h){
             arma::field<arma::uvec> obs_persons_h(m);
             for(arma::uword j = 0; j < m; ++j) {
                 obs_persons_h(j) = obs_persons(j, h);
             }
             
-            result.slice(h) = draw_f_(f.slice(h), y.slice(h), K.slice(h),
+            result.slice(h) = draw_f_(f.slice(h), y.slice(h), S.slice(h),
                                      mu.slice(h), thresholds.slice(h), 
                                      obs_persons_h, workspaces);
         }
-    } else {
-        // Constant IRF case
-        arma::mat f_constant(n * horizon, m);
-        arma::mat y_constant(n * horizon, m);
-        arma::mat mu_constant(n * horizon, m);
-        arma::vec theta_constant(n * horizon);
+    }
+    else{
+        // For constant IRF case
+        arma::mat f_constant(n*horizon, m);
+        arma::mat y_constant(n*horizon, m);
+        arma::mat mu_constant(n*horizon, m);
+        arma::vec theta_constant(n*horizon);
         
         arma::field<arma::uvec> obs_persons_constant(m);
         for(arma::uword j = 0; j < m; ++j) {
@@ -99,7 +101,7 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
             obs_persons_constant(j) = all_obs;
         }
         
-        for (arma::uword h = 0; h < horizon; h++) {
+        for (arma::uword h = 0; h < horizon; h++){
             theta_constant.subvec(h*n, (h+1)*n-1) = theta.col(h);
             for (arma::uword j = 0; j < m; ++j) {
                 f_constant.col(j).subvec(h*n, (h+1)*n-1) = f.slice(h).col(j);
@@ -108,22 +110,21 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
             }
         }
         
-        // Build combined kernel matrix
-        arma::mat K_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
-        K_constant.diag() += 1e-6;
+        arma::mat S_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
+        S_constant.diag() += 1e-6;
         
-        // Need larger workspace for combined data
-        arma::field<IterativeWorkspace> workspaces_large(m);
+        // Create larger workspaces for constant case
+        arma::field<IterativeWorkspace> ws_constant(m);
         for(arma::uword j = 0; j < m; ++j) {
-            workspaces_large(j) = IterativeWorkspace(n * horizon, 50);
+            ws_constant(j) = IterativeWorkspace(n*horizon, 30);
         }
         
-        arma::mat f_prime = draw_f_(f_constant, y_constant, K_constant, 
+        arma::mat f_prime = draw_f_(f_constant, y_constant, S_constant, 
                                    mu_constant, thresholds.slice(0), 
-                                   obs_persons_constant, workspaces_large);
+                                   obs_persons_constant, ws_constant);
 
-        for (arma::uword h = 0; h < horizon; ++h) {
-            for (arma::uword j = 0; j < m; ++j) {
+        for (arma::uword h = 0; h < horizon; ++h){
+            for (arma::uword j = 0; j < m; ++j){
                 result.slice(h).col(j) = f_prime.col(j).subvec(h*n, (h+1)*n-1);
             }
         }

@@ -1,31 +1,31 @@
 #include <RcppArmadillo.h>
 
-// Include iterative solvers
-#include "iterative_solvers.h"
-
 // Function to set seed state
 void set_seed_state(Rcpp::NumericVector seed_state);
 void set_seed(int seed);
 Rcpp::NumericVector get_seed_state();
 
-// Function to draw f with sparsity support and workspace
+// Forward declaration for workspace
+struct IterativeWorkspace;
+
+// Function to draw f with sparsity support and iterative methods
 arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
-                  const arma::cube& K,  // Changed from cholS to K
+                  const arma::cube& S,  // Pass S instead of cholS
                   const arma::mat& beta_prior_sds, 
                   const arma::cube& mu, const arma::cube& thresholds, 
                   const int constant_IRF,
                   const arma::field<arma::uvec>& obs_items,
-                  arma::field<IterativeWorkspace>& workspaces);
+                  arma::field<IterativeWorkspace>& workspaces);  // Pre-allocated workspaces
 
-// Function to draw fstar with workspace
+// Function to draw fstar
 arma::cube draw_fstar(const arma::cube& f, 
                       const arma::mat& theta,
                       const arma::vec& theta_star, 
                       const arma::mat& beta_prior_sds,
-                      const arma::cube& K,  // Changed from L to K
+                      const arma::cube& S,  // Pass S instead of L
                       const arma::cube& mu_star,
                       const int constant_IRF,
-                      arma::field<IterativeWorkspace>& workspaces);
+                      IterativeWorkspace& workspace);
 
 // Function to draw theta with sparsity support
 arma::mat draw_theta(const arma::vec& theta_star,
@@ -71,5 +71,7 @@ double ll_bar_sparse(const arma::vec& f, const arma::vec& y,
 arma::vec delta_to_threshold(const arma::vec& deltas);
 arma::vec threshold_to_delta(const arma::vec& thresholds);
 
-// Helper functions (no longer needed for Cholesky)
+// cholesky decomposition (kept for compatibility)
 arma::mat double_solve(const arma::mat& L, const arma::mat& X);
+arma::mat compress_toeplitz(arma::mat& T);
+arma::mat toep_cholesky_lower(arma::mat& T);

@@ -1,47 +1,44 @@
 #include "gpirt.h"
+#include "mvnormal.h"
 #include "iterative_solvers.h"
+#include <time.h>
 
 inline arma::mat draw_fstar_(const arma::mat& f, const arma::vec& theta,
-                            const arma::vec& theta_star, const arma::mat& beta_prior_sds,
-                            const arma::mat& K, const arma::mat& mu_star,
-                            arma::field<IterativeWorkspace>& workspaces) {
+                             const arma::vec& theta_star, const arma::mat& beta_prior_sds,
+                             const arma::mat& S, const arma::mat& mu_star,
+                             IterativeWorkspace& ws) {
     arma::uword n = f.n_rows;
     arma::uword m = f.n_cols;
     arma::uword N = theta_star.n_elem;
     arma::mat result(N, m);
     
-    // Compute cross-covariance
     arma::mat kstar = K(theta, theta_star, beta_prior_sds.col(0));
     arma::mat kstarT = kstar.t();
     
-    // For each item, solve K * alpha = f using PCG
-    #pragma omp parallel for schedule(dynamic)
+    // Use PCG instead of Cholesky solve
+    arma::vec M_inv_diag = 1.0 / S.diag();  // Diagonal preconditioner
+    
     for (arma::uword j = 0; j < m; ++j) {
-        // Use PCG to solve K * alpha = f(:,j)
-        arma::vec alpha = pcg_solve(K, f.col(j), workspaces(j), 1e-5, 30);
-        
-        // Predictive mean
+        // Solve S * alpha = f.col(j) using PCG
+        arma::vec alpha = pcg_solve(S, f.col(j), M_inv_diag, 1e-6, 50);
         arma::vec draw_mean = kstarT * alpha + mu_star.col(j);
         
-        // For predictive covariance, we need K** - K*' K^-1 K*
-        // Approximate using low-rank update
-        arma::mat tmp = kstarT;
-        for(arma::uword i = 0; i < n; ++i) {
-            arma::vec k_i = kstar.col(i);
-            arma::vec v = pcg_solve(K, k_i, workspaces(j), 1e-5, 20);
-            tmp.col(i) = v;
+        // Compute posterior covariance
+        arma::mat tmp(n, N);
+        for(arma::uword k = 0; k < N; ++k) {
+            tmp.col(k) = pcg_solve(S, kstar.col(k), M_inv_diag, 1e-6, 30);
         }
         
-        arma::mat K_post = K(theta_star, theta_star, beta_prior_sds.col(0));
-        K_post -= kstarT * tmp;
+        arma::mat K_post = K(theta_star, theta_star, beta_prior_sds.col(0)) - kstarT * tmp;
         K_post.diag() += 1e-6;
         
-        // Sample from posterior using Lanczos
-        IterativeWorkspace work_post(N, 30);
-        arma::vec sample = lanczos_mvn_sample(K_post, work_post, 30);
+        // Create workspace for posterior sampling if needed
+        IterativeWorkspace ws_post(N, 20);
+        arma::vec sample = lanczos_mvn_sample(K_post, ws_post.z, ws_post.Q, 
+                                              ws_post.alpha, ws_post.beta, 20);
+        
         result.col(j) = draw_mean + sample;
     }
-    
     return result;
 }
 
@@ -49,40 +46,38 @@ arma::cube draw_fstar(const arma::cube& f,
                       const arma::mat& theta,
                       const arma::vec& theta_star, 
                       const arma::mat& beta_prior_sds,
-                      const arma::cube& K,  // Now K instead of L
+                      const arma::cube& S,  // Now S instead of L
                       const arma::cube& mu_star,
                       const int constant_IRF,
-                      arma::field<IterativeWorkspace>& workspaces) {
+                      IterativeWorkspace& workspace) {
     arma::uword n = f.n_rows;
     arma::uword horizon = f.n_slices;
     arma::uword m = f.n_cols;
     arma::uword N = theta_star.n_elem;
     arma::cube results = arma::zeros<arma::cube>(N, m, horizon);
     
-    if(constant_IRF == 0) {
-        // Non-constant IRF
-        for (arma::uword h = 0; h < horizon; ++h) {
+    if(constant_IRF==0){
+        for (arma::uword h = 0; h < horizon; ++h){
             results.slice(h) = draw_fstar_(f.slice(h), theta.col(h), 
                                           theta_star, beta_prior_sds, 
-                                          K.slice(h), mu_star.slice(h),
-                                          workspaces);
+                                          S.slice(h), mu_star.slice(h),
+                                          workspace);
         }
-    } else {
-        // Constant IRF - use inducing points
-        arma::mat f_constant_all(n * horizon, m);
-        arma::vec theta_constant_all(n * horizon);
-        
-        for (arma::uword h = 0; h < horizon; h++) {
+    }
+    else{
+        // Constant IRF case with inducing points
+        arma::mat f_constant_all(n*horizon, m);
+        arma::vec theta_constant_all(n*horizon);
+        for (arma::uword h = 0; h < horizon; h++){
             theta_constant_all.subvec(h*n, (h+1)*n-1) = theta.col(h);
             for (arma::uword j = 0; j < m; ++j) {
                 f_constant_all.col(j).subvec(h*n, (h+1)*n-1) = f.slice(h).col(j);
             }
         }
         
-        // Use inducing points for efficiency
         int n_induced_points = 100;
         arma::mat f_constant(n_induced_points, m);
-        arma::vec theta_constant(n_induced_points);
+        arma::vec theta_constant(f_constant.n_rows);
         theta_constant = arma::linspace(theta.min(), theta.max(), n_induced_points);
         
         for (arma::uword j = 0; j < m; ++j) {
@@ -92,22 +87,17 @@ arma::cube draw_fstar(const arma::cube& f,
             f_constant.col(j) = points;
         }
         
-        // Build kernel for inducing points
-        arma::mat K_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
-        K_constant.diag() += 1e-6;
+        arma::mat S_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
+        S_constant.diag() += 1e-6;
         
-        // Larger workspace for inducing points
-        arma::field<IterativeWorkspace> workspaces_induced(m);
-        for(arma::uword j = 0; j < m; ++j) {
-            workspaces_induced(j) = IterativeWorkspace(n_induced_points, 30);
-        }
-        
+        // Create workspace for inducing points
+        IterativeWorkspace ws_induced(n_induced_points, 30);
         arma::mat f_star = draw_fstar_(f_constant, theta_constant, 
                                        theta_star, beta_prior_sds, 
-                                       K_constant, mu_star.slice(0),
-                                       workspaces_induced);
-        
-        for (arma::uword h = 0; h < horizon; ++h) {
+                                       S_constant, mu_star.slice(0),
+                                       ws_induced);
+
+        for (arma::uword h = 0; h < horizon; ++h){
             results.slice(h) = f_star;
         }
     }
