@@ -65,12 +65,13 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
                 << m << " items observed per respondent ("
                 << (avg_obs/m*100) << "% density)\n";
 
-    // PRE-ALLOCATE WORKSPACES for iterative methods
+    // PRE-ALLOCATE AND INITIALIZE WORKSPACES for iterative methods
     arma::field<IterativeWorkspace> workspaces(m);
     for(arma::uword j = 0; j < m; ++j) {
-        workspaces(j) = IterativeWorkspace(n, 30);
+        workspaces(j).init(n, 30);  // Use init() instead of constructor
     }
-    IterativeWorkspace workspace_fstar(1001, 30);  // For fstar computation
+    IterativeWorkspace workspace_fstar;
+    workspace_fstar.init(1001, 30);  // For fstar computation
 
     // clamp theta
     theta.clamp(-5.0, 5.0);

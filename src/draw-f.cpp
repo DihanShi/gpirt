@@ -8,7 +8,6 @@ arma::vec ess_iterative(const arma::vec& f, const arma::vec& y,
                         const arma::vec& mu, const arma::vec& thresholds,
                         const arma::uvec& obs_idx,
                         IterativeWorkspace& ws) {  // Pre-allocated workspace
-    arma::uword n = f.n_elem;
     
     // Use Lanczos for sampling instead of Cholesky
     arma::vec nu = lanczos_mvn_sample(S, ws.z, ws.Q, ws.alpha, ws.beta, 30);
@@ -51,7 +50,6 @@ inline arma::mat draw_f_(const arma::mat& f, const arma::mat& y,
     arma::uword m = f.n_cols;
     arma::mat result(n, m);
     
-    #pragma omp parallel for schedule(dynamic)
     for (arma::uword j = 0; j < m; ++j) {
         result.col(j) = ess_iterative(f.col(j), y.col(j), S, mu.col(j), 
                                      thresholds.row(j).t(), obs_persons_h(j),
@@ -113,10 +111,10 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
         arma::mat S_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
         S_constant.diag() += 1e-6;
         
-        // Create larger workspaces for constant case
+        // Create and initialize larger workspaces for constant case
         arma::field<IterativeWorkspace> ws_constant(m);
         for(arma::uword j = 0; j < m; ++j) {
-            ws_constant(j) = IterativeWorkspace(n*horizon, 30);
+            ws_constant(j).init(n*horizon, 30);
         }
         
         arma::mat f_prime = draw_f_(f_constant, y_constant, S_constant, 

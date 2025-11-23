@@ -32,8 +32,9 @@ inline arma::mat draw_fstar_(const arma::mat& f, const arma::vec& theta,
         arma::mat K_post = K(theta_star, theta_star, beta_prior_sds.col(0)) - kstarT * tmp;
         K_post.diag() += 1e-6;
         
-        // Create workspace for posterior sampling if needed
-        IterativeWorkspace ws_post(N, 20);
+        // Create and initialize workspace for posterior sampling if needed
+        IterativeWorkspace ws_post;
+        ws_post.init(N, 20);
         arma::vec sample = lanczos_mvn_sample(K_post, ws_post.z, ws_post.Q, 
                                               ws_post.alpha, ws_post.beta, 20);
         
@@ -90,8 +91,9 @@ arma::cube draw_fstar(const arma::cube& f,
         arma::mat S_constant = K(theta_constant, theta_constant, beta_prior_sds.col(0));
         S_constant.diag() += 1e-6;
         
-        // Create workspace for inducing points
-        IterativeWorkspace ws_induced(n_induced_points, 30);
+        // Create and initialize workspace for inducing points
+        IterativeWorkspace ws_induced;
+        ws_induced.init(n_induced_points, 30);
         arma::mat f_star = draw_fstar_(f_constant, theta_constant, 
                                        theta_star, beta_prior_sds, 
                                        S_constant, mu_star.slice(0),

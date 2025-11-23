@@ -117,8 +117,11 @@ struct IterativeWorkspace {
     arma::vec p;
     arma::vec Ap;
     
-    // Constructor
-    IterativeWorkspace(arma::uword n, int num_lanczos = 30) {
+    // Default constructor (required for arma::field)
+    IterativeWorkspace() {}
+    
+    // Initialization function to set up workspace
+    void init(arma::uword n, int num_lanczos = 30) {
         // Lanczos workspace
         z = arma::vec(n);
         Q = arma::mat(n, num_lanczos);
@@ -133,6 +136,11 @@ struct IterativeWorkspace {
         z_pcg = arma::vec(n);
         p = arma::vec(n);
         Ap = arma::vec(n);
+    }
+    
+    // Constructor with initialization
+    IterativeWorkspace(arma::uword n, int num_lanczos = 30) {
+        init(n, num_lanczos);
     }
 };
 
