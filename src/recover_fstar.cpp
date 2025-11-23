@@ -1,5 +1,6 @@
 #include "gpirt.h"
 #include "mvnormal.h"
+#include "iterative_solvers.h"
 #include <Rcpp.h>
 
 using namespace Rcpp;
@@ -25,8 +26,16 @@ Rcpp::List recover_fstar(int seed,
             obs_persons(j, h) = arma::find_finite(y.slice(h).col(j));
         }
     }
+    
+    // Create and initialize workspaces for iterative methods
+    arma::field<IterativeWorkspace> workspaces(m);
+    for(arma::uword j = 0; j < m; ++j) {
+        workspaces(j).init(n, 30);
+    }
+    IterativeWorkspace workspace_fstar;
+    workspace_fstar.init(1001, 30);
 
-    // set up S
+    // set up S (not cholS anymore)
     arma::cube S = arma::zeros<arma::cube>(n, n, horizon);
     for (arma::uword h = 0; h < horizon; h++)
     {
@@ -55,19 +64,16 @@ Rcpp::List recover_fstar(int seed,
     for (arma::uword h = 0; h < horizon; h++){
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
-
-    // set up cholS
-    arma::cube cholS(n, n, horizon);
-    for (arma::uword h = 0; h < horizon; h++){
-        cholS.slice(h) = arma::chol(S.slice(h), "lower");
-    }
     
     // restore seed
     set_seed(seed);
     
-    // Use sparse version of draw_f
-    f = draw_f(f, theta, y, cholS, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons);
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
+    // Use sparse version of draw_f with iterative methods
+    f = draw_f(f, theta, y, S, beta_prior_sds, mu, thresholds, 
+               constant_IRF, obs_persons, workspaces);
+    
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, S, 
+                                  mu_star, constant_IRF, workspace_fstar);
     
     Rcpp::List result = Rcpp::List::create(Rcpp::Named("fstar", f_star));
     return result;
