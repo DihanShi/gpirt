@@ -5,7 +5,6 @@
 
 using namespace Rcpp;
 
-// utility functions to set seed
 void set_seed(int seed) {
     Environment base_env("package:base");
     Function set_seed_r = base_env["set.seed"];
@@ -42,10 +41,14 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::uword horizon = y.n_slices;
     int total_iterations = sample_iterations + burn_iterations;
 
+    // Initialize Cholesky cache and workspace
+    CholeskyCache chol_cache(n, horizon);
+    Workspace ws(n, m, horizon);
+
     // Create sparsity masks for efficient NA handling
-    arma::field<arma::uvec> obs_items(n, horizon);  // Observed item indices per person/time
-    arma::field<arma::uvec> obs_persons(m, horizon); // Observed person indices per item/time
-    arma::umat n_obs(n, horizon);  // Number of observed items per person/time
+    arma::field<arma::uvec> obs_items(n, horizon);
+    arma::field<arma::uvec> obs_persons(m, horizon);
+    arma::umat n_obs(n, horizon);
 
     // Pre-compute indices of non-missing data
     for (arma::uword h = 0; h < horizon; ++h) {
@@ -67,27 +70,20 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     // clamp theta
     theta.clamp(-5.0, 5.0);
 
-    // Draw initial values of theta, f, and beta
-    arma::mat mean_zeros = arma::zeros<arma::mat>(n, horizon);
-    arma::cube S = arma::zeros<arma::cube>(n, n, horizon);
-    for (arma::uword h = 0; h < horizon; h++)
-    {   
-        S.slice(h) = K(theta.col(h), theta.col(h), beta_prior_sds.col(0));
-        S.slice(h).diag() += 1e-6;
-    }
-    
+    // Initialize and cache Cholesky decompositions
+    update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+
     arma::cube X(n, 3, horizon);
     X.col(0) = arma::ones<arma::mat>(n, horizon);
     X.col(1) = theta;
     X.col(2) = arma::pow(theta,2);
     arma::cube f(n, m, horizon);
-    arma::cube cholS(n, n, horizon);
     arma::cube beta(3, m, horizon);
     arma::cube mu(n,m,horizon);
     
     Rcpp::Rcout << "Setting up gpirtMCMC...\n";
 
-    // Setup each horizon separately for non-constant IRFs
+    // Setup initial values
     if(constant_IRF==0){
         for(arma::uword h = 0; h < horizon; ++h){
             for ( arma::uword j = 0; j < m; ++j ) {
@@ -99,13 +95,12 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
         for (arma::uword h = 0; h < horizon; h++){
             for ( arma::uword j = 0; j < m; ++j ) {
-                cholS.slice(h) = arma::chol(S.slice(h), "lower");
-                f.slice(h).col(j) = rmvnorm(cholS.slice(h));
+                // Use cached Cholesky
+                f.slice(h).col(j) = rmvnorm(chol_cache.L.slice(h));
             }
         }
     } 
     else{
-        // Setup IRF object jointly using thetas across all horizons
         arma::vec theta_constant(n*horizon);
         for (arma::uword h = 0; h < horizon; h++){
             theta_constant.subvec(h*n, (h+1)*n-1) = theta.col(h);
@@ -131,7 +126,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         mu_constant = X_constant * beta.slice(0);
         
         for ( arma::uword j = 0; j < m; ++j ) {
-            f_constant.col(j).subvec(0, n-1) = rmvnorm(cholS.slice(0));
+            f_constant.col(j).subvec(0, n-1) = rmvnorm(chol_cache.L.slice(0));
             for (arma::uword h = 0; h < horizon; h++){
                 f_constant.col(j).subvec(h*n, (h+1)*n-1) = f_constant.col(j).subvec(0, n-1);
             }
@@ -141,7 +136,6 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             for ( arma::uword j = 0; j < m; ++j ) {
                 f.slice(h).col(j) = f_constant.col(j).subvec(h*n, (h+1)*n-1);
                 mu.slice(h).col(j) = mu_constant.col(j).subvec(h*n, (h+1)*n-1);
-                cholS.slice(h) = cholS_constant.submat(h*n,h*n,(h+1)*n-1,(h+1)*n-1);
             }
         }
     }
@@ -158,7 +152,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
     
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
     Rcpp::Rcout << "start running gpirtMCMC...\n";
 
     // Setup results storage
@@ -169,26 +163,23 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::field<arma::cube> threshold_draws(int(sample_iterations/THIN));
     arma::vec               ll_draws(int(sample_iterations/THIN));
 
-    // Information for progress bar:
     double progress_increment = (1.0 / total_iterations) * 100.0;
     double progress = 0.0;
 
     // Start sampling loop
     for ( int iter = 0; iter < total_iterations; ++iter ) {
-        // Update progress and check for user interrupt
         Rprintf("\r%6.3f %% complete", progress);
         progress += progress_increment;
         Rcpp::checkUserInterrupt();
 
-        // set seed
         set_seed(iter);
 
-        // Draw new parameter values with sparse handling
-        f      = draw_f(f, theta, y, cholS, beta_prior_sds, mu, thresholds, 
-                       constant_IRF, obs_persons);
-        f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
+        // Draw with cached Cholesky and workspace
+        f      = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
+                       constant_IRF, obs_persons, ws);
+        f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
         theta  = draw_theta(theta_star, y, theta, theta_prior_sds, f_star, 
-                           mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items);
+                           mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws);
         
         // update X from theta
         X.col(1) = theta;
@@ -202,29 +193,22 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             }
         }
         
-        // draw beta with sparse handling
         beta = draw_beta(beta, X, y, f, beta_prior_means, beta_prior_sds, 
-                        thresholds, obs_persons);
+                        thresholds, obs_persons, ws);
         
-        // update up S, mu, cholS from theta/beta
+        // Update mu
         for (arma::uword h = 0; h < horizon; h++){
             mu.slice(h) = X.slice(h) * beta.slice(h);
             mu_star.slice(h) = Xstar * beta.slice(h);
         }
-        for (arma::uword h = 0; h < horizon; h++)
-        {
-            S.slice(h) = K(theta.col(h), theta.col(h), beta_prior_sds.col(0));
-            S.slice(h).diag() += 1e-6;
-        }
-
-        for (arma::uword h = 0; h < horizon; h++){
-            cholS.slice(h) = arma::chol(S.slice(h), "lower");
-        }
-
-        // draw thresholds with sparse handling
-        thresholds = draw_threshold(thresholds, y, f, mu, constant_IRF, obs_persons);
         
-        // compute current log likelihood (only for observed data)
+        // Mark cache for update (theta has changed)
+        chol_cache.needs_update = true;
+        update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+
+        thresholds = draw_threshold(thresholds, y, f, mu, constant_IRF, obs_persons, ws);
+        
+        // Compute log likelihood
         double ll = 0;
         for (arma::uword h = 0; h < horizon; h++){
             for (arma::uword j = 0; j < m; j++) {
@@ -235,7 +219,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
 
         if (iter>=burn_iterations && iter%THIN == 0){
-            int store_idx                  = int((iter-burn_iterations)/THIN);
+            int store_idx = int((iter-burn_iterations)/THIN);
             theta_draws.row(store_idx)     = theta;
             f_draws[store_idx]             = f;
             beta_draws[store_idx]          = beta;
