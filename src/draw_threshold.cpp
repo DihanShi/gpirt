@@ -30,9 +30,14 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
                 ws.y_obs.set_size(obs_idx.n_elem);
                 ws.mu_obs.set_size(obs_idx.n_elem);
                 
-                ws.f_obs = f.slice(h).col(j)(obs_idx);
-                ws.y_obs = y.slice(h).col(j)(obs_idx);
-                ws.mu_obs = mu.slice(h).col(j)(obs_idx);
+                // Correct syntax: first get the column as a vector, then subset
+                arma::vec f_col = f.slice(h).col(j);
+                arma::vec y_col = y.slice(h).col(j);
+                arma::vec mu_col = mu.slice(h).col(j);
+                
+                ws.f_obs = f_col.elem(obs_idx);
+                ws.y_obs = y_col.elem(obs_idx);
+                ws.mu_obs = mu_col.elem(obs_idx);
                 
                 arma::uvec valid_idx = arma::linspace<arma::uvec>(0, obs_idx.n_elem-1, obs_idx.n_elem);
                 
@@ -63,9 +68,14 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
                     ws.y_obs.set_size(obs_idx.n_elem);
                     ws.mu_obs.set_size(obs_idx.n_elem);
                     
-                    ws.f_obs = f.slice(h).col(j)(obs_idx);
-                    ws.y_obs = y.slice(h).col(j)(obs_idx);
-                    ws.mu_obs = mu.slice(h).col(j)(obs_idx);
+                    // Correct syntax: first get the column as a vector, then subset
+                    arma::vec f_col = f.slice(h).col(j);
+                    arma::vec y_col = y.slice(h).col(j);
+                    arma::vec mu_col = mu.slice(h).col(j);
+                    
+                    ws.f_obs = f_col.elem(obs_idx);
+                    ws.y_obs = y_col.elem(obs_idx);
+                    ws.mu_obs = mu_col.elem(obs_idx);
                     
                     arma::uvec valid_idx = arma::linspace<arma::uvec>(0, obs_idx.n_elem-1, obs_idx.n_elem);
                     
