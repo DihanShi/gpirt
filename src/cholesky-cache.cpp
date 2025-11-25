@@ -1,5 +1,13 @@
 #include "gpirt.h"
 
+// Solve L * L^T * x = b using forward and back substitution
+arma::mat double_solve(const arma::mat& L, const arma::mat& X) {
+    // First solve L * tmp = X (forward substitution)
+    arma::mat tmp = arma::solve(arma::trimatl(L), X);
+    // Then solve L^T * result = tmp (back substitution)
+    return arma::solve(arma::trimatu(L.t()), tmp);
+}
+
 void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
                           const arma::mat& beta_prior_sds,
                           const double& os, const double& ls,
