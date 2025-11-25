@@ -25,12 +25,12 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
         for (arma::uword j = 0; j < m; j++){
             arma::uvec obs_idx = obs_persons(j, h);
             if(obs_idx.n_elem > 0) {
-                // Use workspace for temporary storage
+                // Use workspace for temporary storage - correct syntax
                 ws.f_obs.set_size(obs_idx.n_elem);
                 ws.y_obs.set_size(obs_idx.n_elem);
                 ws.mu_obs.set_size(obs_idx.n_elem);
                 
-                // Correct syntax: first get the column as a vector, then subset
+                // Extract column first, then subset
                 arma::vec f_col = f.slice(h).col(j);
                 arma::vec y_col = y.slice(h).col(j);
                 arma::vec mu_col = mu.slice(h).col(j);
@@ -68,7 +68,7 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
                     ws.y_obs.set_size(obs_idx.n_elem);
                     ws.mu_obs.set_size(obs_idx.n_elem);
                     
-                    // Correct syntax: first get the column as a vector, then subset
+                    // Extract column first, then subset
                     arma::vec f_col = f.slice(h).col(j);
                     arma::vec y_col = y.slice(h).col(j);
                     arma::vec mu_col = mu.slice(h).col(j);

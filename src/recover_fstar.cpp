@@ -18,6 +18,10 @@ Rcpp::List recover_fstar(int seed,
     arma::uword m = f.n_cols;
     arma::uword horizon = f.n_slices;
 
+    // Initialize cache and workspace
+    CholeskyCache chol_cache(n, horizon);
+    Workspace ws(n, m, horizon);
+
     // Create sparsity masks for this function
     arma::field<arma::uvec> obs_persons(m, horizon);
     for (arma::uword h = 0; h < horizon; ++h) {
@@ -26,13 +30,8 @@ Rcpp::List recover_fstar(int seed,
         }
     }
 
-    // set up S
-    arma::cube S = arma::zeros<arma::cube>(n, n, horizon);
-    for (arma::uword h = 0; h < horizon; h++)
-    {
-        S.slice(h) = K(theta.col(h), theta.col(h), beta_prior_sds.col(0));
-        S.slice(h).diag() += 1e-6;
-    }
+    // Initialize and update cache
+    update_cholesky_cache(chol_cache, theta, beta_prior_sds, 0, 0, "");
 
     // set up X
     arma::cube X(n, 2, horizon);
@@ -55,19 +54,13 @@ Rcpp::List recover_fstar(int seed,
     for (arma::uword h = 0; h < horizon; h++){
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
-
-    // set up cholS
-    arma::cube cholS(n, n, horizon);
-    for (arma::uword h = 0; h < horizon; h++){
-        cholS.slice(h) = arma::chol(S.slice(h), "lower");
-    }
     
     // restore seed
     set_seed(seed);
     
-    // Use sparse version of draw_f
-    f = draw_f(f, theta, y, cholS, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons);
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, cholS, mu_star, constant_IRF);
+    // Use sparse version of draw_f with cache and workspace
+    f = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons, ws);
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
     
     Rcpp::List result = Rcpp::List::create(Rcpp::Named("fstar", f_star));
     return result;

@@ -2,3 +2,9 @@ CXX_STD = CXX11
 PKG_CXXFLAGS = @OPENMP_FLAG@
 PKG_LIBS = @OPENMP_FLAG@ $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)
 PKG_CPPFLAGS = -DARMA_64BIT_WORD=1
+
+SOURCES = RcppExports.cpp covariance-function.cpp cholesky-cache.cpp \
+          draw-beta.cpp draw-f.cpp draw-fstar.cpp draw-theta.cpp \
+          draw_threshold.cpp gpirtMCMC.cpp log-likelihood.cpp recover_fstar.cpp
+
+OBJECTS = $(SOURCES:.cpp=.o)
