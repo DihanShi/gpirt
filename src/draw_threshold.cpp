@@ -1,10 +1,10 @@
 #include "gpirt.h"
 #include "mvnormal.h"
 
-arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
-                                  const arma::cube& y, const arma::cube& mu,
-                                  const arma::field<arma::uvec>& obs_persons,
-                                  Workspace& ws) {
+arma::vec ess_threshold_sparse_threadsafe(const arma::vec& delta, const arma::cube& f,
+                                           const arma::cube& y, const arma::cube& mu,
+                                           const arma::field<arma::uvec>& obs_persons,
+                                           Workspace& ws) {
     arma::uword C = delta.n_elem + 1;
     arma::uword m = y.n_cols;
     arma::uword horizon = y.n_slices;
@@ -13,11 +13,11 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
     arma::mat S = arma::diagmat(v);
     arma::mat cholS = arma::chol(S, "lower");
     
-    // Use pre-allocated workspace
+    // Use thread-safe RNG
     ws.nu.set_size(C-1);
-    ws.nu = rmvnorm(cholS);
+    ws.nu = rmvnorm_threadsafe(cholS, ws.rng);
     
-    double u = R::runif(0.0,1.0);
+    double u = ws.rng.runif();
     double log_y = std::log(u);
     arma::vec thresholds = delta_to_threshold(delta);
     
@@ -25,12 +25,10 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
         for (arma::uword j = 0; j < m; j++){
             arma::uvec obs_idx = obs_persons(j, h);
             if(obs_idx.n_elem > 0) {
-                // Use workspace for temporary storage - correct syntax
                 ws.f_obs.set_size(obs_idx.n_elem);
                 ws.y_obs.set_size(obs_idx.n_elem);
                 ws.mu_obs.set_size(obs_idx.n_elem);
                 
-                // Extract column first, then subset
                 arma::vec f_col = f.slice(h).col(j);
                 arma::vec y_col = y.slice(h).col(j);
                 arma::vec mu_col = mu.slice(h).col(j);
@@ -49,10 +47,9 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
     bool reject = true;
     double epsilon_min = 0.0;
     double epsilon_max = M_2PI;
-    double epsilon = R::runif(epsilon_min, epsilon_max);
+    double epsilon = ws.rng.runif(epsilon_min, epsilon_max);
     epsilon_min = epsilon - M_2PI;
     
-    // Use pre-allocated workspace
     ws.delta_prime.set_size(C-1);
 
     while (reject) {
@@ -68,7 +65,6 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
                     ws.y_obs.set_size(obs_idx.n_elem);
                     ws.mu_obs.set_size(obs_idx.n_elem);
                     
-                    // Extract column first, then subset
                     arma::vec f_col = f.slice(h).col(j);
                     arma::vec y_col = y.slice(h).col(j);
                     arma::vec mu_col = mu.slice(h).col(j);
@@ -94,7 +90,7 @@ arma::vec ess_threshold_sparse_ws(const arma::vec& delta, const arma::cube& f,
             else {
                 epsilon_max = epsilon;
             }
-            epsilon = R::runif(epsilon_min, epsilon_max);
+            epsilon = ws.rng.runif(epsilon_min, epsilon_max);
         }
     }
     return ws.delta_prime;
@@ -104,13 +100,13 @@ arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
                          const arma::cube& f, const arma::cube& mu, 
                          const int constant_IRF,
                          const arma::field<arma::uvec>& obs_persons,
-                         Workspace& ws){
+                         WorkspacePool& ws_pool){
     arma::uword m = thresholds.n_rows;
     arma::uword C = thresholds.n_cols - 1;
     arma::uword horizon = thresholds.n_slices;
     arma::cube thresholds_prime(m, C+1, horizon, arma::fill::zeros);
     
-    if(constant_IRF==1){
+    if(constant_IRF == 1){
         arma::field<arma::uvec> obs_persons_combined(m, 1);
         for(arma::uword j = 0; j < m; ++j) {
             arma::uvec all_obs;
@@ -121,13 +117,22 @@ arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
             obs_persons_combined(j, 0) = all_obs;
         }
         
-        for ( arma::uword j = 0; j < m; ++j ){
+        // Parallelize over items
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
+        for (arma::uword j = 0; j < m; ++j){
+            int tid = get_thread_id();
+            Workspace& ws = ws_pool.get(tid);
+            
             arma::field<arma::uvec> obs_j(1, 1);
             obs_j(0, 0) = obs_persons_combined(j, 0);
             
             arma::vec delta = threshold_to_delta(thresholds.slice(0).row(j).t());
-            arma::vec delta_prime = ess_threshold_sparse_ws(delta, f, y, mu, obs_j, ws);
-            thresholds_prime.slice(0).row(j) = delta_to_threshold(delta_prime).t();
+            arma::vec delta_prime = ess_threshold_sparse_threadsafe(delta, f, y, mu, obs_j, ws);
+            arma::vec new_thresholds = delta_to_threshold(delta_prime);
+            
+            thresholds_prime.slice(0).row(j) = new_thresholds.t();
             
             for(arma::uword h = 1; h < horizon; ++h){
                 thresholds_prime.slice(h).row(j) = thresholds_prime.slice(0).row(j);
@@ -135,8 +140,15 @@ arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
         }
     }
     else{
-        for ( arma::uword h = 0; h < horizon; ++h){
-            for ( arma::uword j = 0; j < m; ++j ){
+        for (arma::uword h = 0; h < horizon; ++h){
+            // Parallelize over items
+            #ifdef _OPENMP
+            #pragma omp parallel for schedule(dynamic)
+            #endif
+            for (arma::uword j = 0; j < m; ++j){
+                int tid = get_thread_id();
+                Workspace& ws = ws_pool.get(tid);
+                
                 arma::field<arma::uvec> obs_j(1, 1);
                 obs_j(0, 0) = obs_persons(j, h);
                 
@@ -149,7 +161,7 @@ arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
                 mu_h.slice(0).col(0) = mu.slice(h).col(j);
                 
                 arma::vec delta = threshold_to_delta(thresholds.slice(h).row(j).t());
-                arma::vec delta_prime = ess_threshold_sparse_ws(delta, f_h, y_h, mu_h, obs_j, ws);
+                arma::vec delta_prime = ess_threshold_sparse_threadsafe(delta, f_h, y_h, mu_h, obs_j, ws);
                 thresholds_prime.slice(h).row(j) = delta_to_threshold(delta_prime).t();
             }
         }

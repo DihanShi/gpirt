@@ -1,26 +1,25 @@
 #include "gpirt.h"
 #include "mvnormal.h"
 
-// Sparse ESS function with pre-allocated workspace
-arma::vec ess_sparse_ws(const arma::vec& f, const arma::vec& y, const arma::mat& cholS,
-                        const arma::vec& mu, const arma::vec& thresholds,
-                        const arma::uvec& obs_idx, Workspace& ws) {
+// Sparse ESS function with thread-safe RNG
+arma::vec ess_sparse_threadsafe(const arma::vec& f, const arma::vec& y, const arma::mat& cholS,
+                                const arma::vec& mu, const arma::vec& thresholds,
+                                const arma::uvec& obs_idx, Workspace& ws) {
     arma::uword n = f.n_elem;
     
-    // Use pre-allocated workspace
+    // Use workspace with thread-safe RNG
     ws.nu.set_size(n);
-    ws.nu = rmvnorm(cholS);
+    ws.nu = rmvnorm_threadsafe(cholS, ws.rng);
     
-    double u = R::runif(0.0, 1.0);
+    double u = ws.rng.runif();
     double log_y = ll_bar_sparse(f, y, mu, thresholds, obs_idx) + std::log(u);
     
     bool reject = true;
     double epsilon_min = 0.0;
     double epsilon_max = M_2PI;
-    double epsilon = R::runif(epsilon_min, epsilon_max);
+    double epsilon = ws.rng.runif(epsilon_min, epsilon_max);
     epsilon_min = epsilon - M_2PI;
     
-    // Use pre-allocated f_prime
     ws.f_prime.set_size(n);
     
     while (reject) {
@@ -33,25 +32,18 @@ arma::vec ess_sparse_ws(const arma::vec& f, const arma::vec& y, const arma::mat&
             } else {
                 epsilon_max = epsilon;
             }
-            epsilon = R::runif(epsilon_min, epsilon_max);
+            epsilon = ws.rng.runif(epsilon_min, epsilon_max);
         }
     }
     return ws.f_prime;
 }
 
-// Updated draw_f_ with workspace
-inline arma::mat draw_f_ws(const arma::mat& f, const arma::mat& y, const arma::mat& cholS,
-                           const arma::mat& mu, const arma::mat& thresholds,
-                           const arma::field<arma::uvec>& obs_persons_h, Workspace& ws) {
-    arma::uword n = f.n_rows;
-    arma::uword m = f.n_cols;
-    arma::mat result(n, m);
-    
-    for (arma::uword j = 0; j < m; ++j) {
-        result.col(j) = ess_sparse_ws(f.col(j), y.col(j), cholS, mu.col(j), 
-                                      thresholds.row(j).t(), obs_persons_h(j), ws);
-    }
-    return result;
+// Draw f for a single horizon slice - can be called in parallel for different items
+inline void draw_f_item(arma::vec& result, const arma::vec& f_col, const arma::vec& y_col,
+                        const arma::mat& cholS, const arma::vec& mu_col, 
+                        const arma::vec& thresholds_row, const arma::uvec& obs_idx,
+                        Workspace& ws) {
+    result = ess_sparse_threadsafe(f_col, y_col, cholS, mu_col, thresholds_row, obs_idx, ws);
 }
 
 arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
@@ -59,7 +51,7 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
                   const arma::cube& mu, const arma::cube& thresholds, 
                   const int constant_IRF,
                   const arma::field<arma::uvec>& obs_persons,
-                  Workspace& ws) {
+                  WorkspacePool& ws_pool) {
     arma::uword n = f.n_rows;
     arma::uword m = f.n_cols;
     arma::uword horizon = f.n_slices;
@@ -70,14 +62,23 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
 
     if (constant_IRF == 0) {
         for (arma::uword h = 0; h < horizon; ++h) {
-            arma::field<arma::uvec> obs_persons_h(m);
-            for (arma::uword j = 0; j < m; ++j) {
-                obs_persons_h(j) = obs_persons(j, h);
-            }
+            // Get the Cholesky factor for this horizon
+            const arma::mat& L_h = chol_cache.L.slice(h);
             
-            // Use cached Cholesky factor
-            result.slice(h) = draw_f_ws(f.slice(h), y.slice(h), chol_cache.L.slice(h),
-                                        mu.slice(h), thresholds.slice(h), obs_persons_h, ws);
+            // Parallelize over items
+            #ifdef _OPENMP
+            #pragma omp parallel for schedule(dynamic)
+            #endif
+            for (arma::uword j = 0; j < m; ++j) {
+                int tid = get_thread_id();
+                Workspace& ws = ws_pool.get(tid);
+                
+                arma::vec result_col(n);
+                draw_f_item(result_col, f.slice(h).col(j), y.slice(h).col(j), 
+                           L_h, mu.slice(h).col(j), thresholds.slice(h).row(j).t(),
+                           obs_persons(j, h), ws);
+                result.slice(h).col(j) = result_col;
+            }
         }
     } else {
         // For constant IRF case, build combined data
@@ -110,9 +111,22 @@ arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube&
         S_constant.diag() += 1e-6;
         arma::mat L_constant = arma::chol(S_constant, "lower");
         
-        arma::mat f_prime = draw_f_ws(f_constant, y_constant, L_constant, 
-                                      mu_constant, thresholds.slice(0), 
-                                      obs_persons_constant, ws);
+        // Parallelize over items
+        arma::mat f_prime(n*horizon, m);
+        
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
+        for (arma::uword j = 0; j < m; ++j) {
+            int tid = get_thread_id();
+            Workspace& ws = ws_pool.get(tid);
+            
+            arma::vec result_col(n*horizon);
+            draw_f_item(result_col, f_constant.col(j), y_constant.col(j),
+                       L_constant, mu_constant.col(j), thresholds.slice(0).row(j).t(),
+                       obs_persons_constant(j), ws);
+            f_prime.col(j) = result_col;
+        }
 
         for (arma::uword h = 0; h < horizon; ++h) {
             for (arma::uword j = 0; j < m; ++j) {

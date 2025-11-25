@@ -1,4 +1,44 @@
+#ifndef GPIRT_H
+#define GPIRT_H
+
 #include <RcppArmadillo.h>
+#include <random>
+#include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// Thread-safe random number generator wrapper
+class ThreadRNG {
+private:
+    std::mt19937 gen;
+    std::normal_distribution<double> norm_dist;
+    std::uniform_real_distribution<double> unif_dist;
+    
+public:
+    ThreadRNG() : norm_dist(0.0, 1.0), unif_dist(0.0, 1.0) {}
+    
+    void seed(unsigned int s) {
+        gen.seed(s);
+    }
+    
+    double rnorm() {
+        return norm_dist(gen);
+    }
+    
+    double runif() {
+        return unif_dist(gen);
+    }
+    
+    double rnorm(double mean, double sd) {
+        return mean + sd * norm_dist(gen);
+    }
+    
+    double runif(double min, double max) {
+        return min + (max - min) * unif_dist(gen);
+    }
+};
 
 // Function to set seed state
 void set_seed_state(Rcpp::NumericVector seed_state);
@@ -19,7 +59,7 @@ struct CholeskyCache {
         needs_update(true) {}
 };
 
-// Memory workspace for avoiding allocations
+// Memory workspace for avoiding allocations - per thread
 struct Workspace {
     // For ESS functions
     arma::vec nu;
@@ -40,6 +80,9 @@ struct Workspace {
     arma::vec alpha;
     arma::vec draw_mean;
     
+    // Thread-safe RNG
+    ThreadRNG rng;
+    
     // Initialize with maximum expected sizes
     Workspace(arma::uword max_n, arma::uword max_m, arma::uword horizon) :
         nu(max_n), f_prime(max_n), theta_prime(horizon),
@@ -47,17 +90,80 @@ struct Workspace {
         g(max_n), f_obs(max_m), mu_obs(max_m), y_obs(max_m),
         tmp_mat(max_n, max_n), tmp_vec(max_n),
         alpha(max_n), draw_mean(1001) {}  // 1001 for theta_star grid
+        
+    // Copy constructor for creating thread-local copies
+    Workspace(const Workspace& other) :
+        nu(other.nu.n_elem), f_prime(other.f_prime.n_elem), 
+        theta_prime(other.theta_prime.n_elem),
+        beta_prime(other.beta_prime.n_elem), delta_prime(other.delta_prime.n_elem),
+        g(other.g.n_elem), f_obs(other.f_obs.n_elem), 
+        mu_obs(other.mu_obs.n_elem), y_obs(other.y_obs.n_elem),
+        tmp_mat(other.tmp_mat.n_rows, other.tmp_mat.n_cols), 
+        tmp_vec(other.tmp_vec.n_elem),
+        alpha(other.alpha.n_elem), draw_mean(other.draw_mean.n_elem) {}
 };
 
-// Function to draw f with sparsity support and workspace
+// Thread workspace pool
+class WorkspacePool {
+private:
+    std::vector<Workspace> workspaces;
+    arma::uword max_n, max_m, horizon;
+    
+public:
+    WorkspacePool(arma::uword n, arma::uword m, arma::uword h, int num_threads) 
+        : max_n(n), max_m(m), horizon(h) {
+        workspaces.reserve(num_threads);
+        for (int i = 0; i < num_threads; ++i) {
+            workspaces.emplace_back(n, m, h);
+        }
+    }
+    
+    void seed_all(unsigned int base_seed) {
+        for (size_t i = 0; i < workspaces.size(); ++i) {
+            workspaces[i].rng.seed(base_seed + static_cast<unsigned int>(i) * 1000);
+        }
+    }
+    
+    Workspace& get(int thread_id) {
+        return workspaces[thread_id];
+    }
+    
+    Workspace& get_single() {
+        return workspaces[0];
+    }
+    
+    int size() const {
+        return static_cast<int>(workspaces.size());
+    }
+};
+
+// Get number of threads
+inline int get_num_threads() {
+#ifdef _OPENMP
+    return omp_get_max_threads();
+#else
+    return 1;
+#endif
+}
+
+// Get current thread ID
+inline int get_thread_id() {
+#ifdef _OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+
+// Function to draw f with sparsity support and workspace pool
 arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
                   CholeskyCache& chol_cache, const arma::mat& beta_prior_sds, 
                   const arma::cube& mu, const arma::cube& thresholds, 
                   const int constant_IRF,
                   const arma::field<arma::uvec>& obs_items,
-                  Workspace& ws);
+                  WorkspacePool& ws_pool);
 
-// Function to draw fstar with workspace
+// Function to draw fstar with workspace pool
 arma::cube draw_fstar(const arma::cube& f, 
                       const arma::mat& theta,
                       const arma::vec& theta_star, 
@@ -65,9 +171,9 @@ arma::cube draw_fstar(const arma::cube& f,
                       CholeskyCache& chol_cache,
                       const arma::cube& mu_star,
                       const int constant_IRF,
-                      Workspace& ws);
+                      WorkspacePool& ws_pool);
 
-// Function to draw theta with sparsity support and workspace
+// Function to draw theta with sparsity support and workspace pool
 arma::mat draw_theta(const arma::vec& theta_star,
                      const arma::cube& y, const arma::mat& theta,
                      const arma::mat& theta_prior_sds,
@@ -77,22 +183,22 @@ arma::mat draw_theta(const arma::vec& theta_star,
                      const double& ls, const std::string& KERNEL,
                      const arma::field<arma::uvec>& obs_items,
                      CholeskyCache& chol_cache,
-                     Workspace& ws);
+                     WorkspacePool& ws_pool);
 
-// Function to draw beta with sparsity support and workspace
+// Function to draw beta with sparsity support and workspace pool
 arma::cube draw_beta(arma::cube& beta, const arma::cube& X,
                     const arma::cube& y, const arma::cube& f,
                     const arma::mat& prior_means, const arma::mat& prior_sds,
                     const arma::cube& thresholds,
                     const arma::field<arma::uvec>& obs_persons,
-                    Workspace& ws);
+                    WorkspacePool& ws_pool);
 
-// Function to draw thresholds with sparsity support and workspace
+// Function to draw thresholds with sparsity support and workspace pool
 arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
                     const arma::cube& f, const arma::cube& mu, 
                     const int constant_IRF,
                     const arma::field<arma::uvec>& obs_persons,
-                    Workspace& ws);
+                    WorkspacePool& ws_pool);
 
 // Utility function to update Cholesky cache if needed
 void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
@@ -125,3 +231,5 @@ arma::vec threshold_to_delta(const arma::vec& thresholds);
 arma::mat double_solve(const arma::mat& L, const arma::mat& X);
 arma::mat compress_toeplitz(arma::mat& T);
 arma::mat toep_cholesky_lower(arma::mat& T);
+
+#endif // GPIRT_H

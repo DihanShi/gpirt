@@ -18,9 +18,12 @@ Rcpp::List recover_fstar(int seed,
     arma::uword m = f.n_cols;
     arma::uword horizon = f.n_slices;
 
-    // Initialize cache and workspace
+    // Get number of threads
+    int num_threads = get_num_threads();
+
+    // Initialize cache and workspace pool
     CholeskyCache chol_cache(n, horizon);
-    Workspace ws(n, m, horizon);
+    WorkspacePool ws_pool(n, m, horizon, num_threads);
 
     // Create sparsity masks for this function
     arma::field<arma::uvec> obs_persons(m, horizon);
@@ -55,12 +58,12 @@ Rcpp::List recover_fstar(int seed,
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
     
-    // restore seed
-    set_seed(seed);
+    // Seed the workspace pool RNGs
+    ws_pool.seed_all(static_cast<unsigned int>(seed));
     
-    // Use sparse version of draw_f with cache and workspace
-    f = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons, ws);
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
+    // Use parallelized versions with workspace pool
+    f = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, constant_IRF, obs_persons, ws_pool);
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
     
     Rcpp::List result = Rcpp::List::create(Rcpp::Named("fstar", f_star));
     return result;

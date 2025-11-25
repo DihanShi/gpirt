@@ -41,9 +41,13 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::uword horizon = y.n_slices;
     int total_iterations = sample_iterations + burn_iterations;
 
-    // Initialize Cholesky cache and workspace
+    // Get number of threads
+    int num_threads = get_num_threads();
+    Rcpp::Rcout << "Using " << num_threads << " OpenMP thread(s)\n";
+
+    // Initialize Cholesky cache and workspace pool
     CholeskyCache chol_cache(n, horizon);
-    Workspace ws(n, m, horizon);
+    WorkspacePool ws_pool(n, m, horizon, num_threads);
 
     // Create sparsity masks for efficient NA handling
     arma::field<arma::uvec> obs_items(n, horizon);
@@ -152,7 +156,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
     
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
+    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
     Rcpp::Rcout << "start running gpirtMCMC...\n";
 
     // Setup results storage
@@ -172,14 +176,15 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         progress += progress_increment;
         Rcpp::checkUserInterrupt();
 
-        set_seed(iter);
+        // Seed all thread RNGs with iteration-based seeds for reproducibility
+        ws_pool.seed_all(static_cast<unsigned int>(iter * 10000));
 
-        // Draw with cached Cholesky and workspace
+        // Draw with cached Cholesky and workspace pool
         f      = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
-                       constant_IRF, obs_persons, ws);
-        f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws);
+                       constant_IRF, obs_persons, ws_pool);
+        f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
         theta  = draw_theta(theta_star, y, theta, theta_prior_sds, f_star, 
-                           mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws);
+                           mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws_pool);
         
         // update X from theta
         X.col(1) = theta;
@@ -194,7 +199,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
         
         beta = draw_beta(beta, X, y, f, beta_prior_means, beta_prior_sds, 
-                        thresholds, obs_persons, ws);
+                        thresholds, obs_persons, ws_pool);
         
         // Update mu
         for (arma::uword h = 0; h < horizon; h++){
@@ -206,7 +211,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         chol_cache.needs_update = true;
         update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
 
-        thresholds = draw_threshold(thresholds, y, f, mu, constant_IRF, obs_persons, ws);
+        thresholds = draw_threshold(thresholds, y, f, mu, constant_IRF, obs_persons, ws_pool);
         
         // Compute log likelihood
         double ll = 0;

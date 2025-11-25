@@ -34,21 +34,21 @@ inline double compute_ll_sparse(const double theta,
     return result;
 }
 
-inline arma::vec draw_theta_ess_sparse_ws(const arma::vec& theta,
-                                          const arma::mat& y,
-                                          const arma::mat& L,
-                                          const arma::cube& fstar,
-                                          const arma::cube& mu_star,
-                                          const arma::cube& thresholds,
-                                          const arma::field<arma::uvec>& obs_items_i,
-                                          Workspace& ws){
+inline arma::vec draw_theta_ess_sparse_threadsafe(const arma::vec& theta,
+                                                   const arma::mat& y,
+                                                   const arma::mat& L,
+                                                   const arma::cube& fstar,
+                                                   const arma::cube& mu_star,
+                                                   const arma::cube& thresholds,
+                                                   const arma::field<arma::uvec>& obs_items_i,
+                                                   Workspace& ws){
     arma::uword horizon = y.n_cols;
     
-    // Use pre-allocated workspace
+    // Use thread-safe RNG
     ws.nu.set_size(horizon);
-    ws.nu = rmvnorm(L);
+    ws.nu = rmvnorm_threadsafe(L, ws.rng);
     
-    double u = R::runif(0.0,1.0);
+    double u = ws.rng.runif();
     double log_y = std::log(u);
     
     for (arma::uword h = 0; h < horizon; h++) {
@@ -60,10 +60,9 @@ inline arma::vec draw_theta_ess_sparse_ws(const arma::vec& theta,
     bool reject = true;
     double epsilon_min = 0.0;
     double epsilon_max = M_2PI;
-    double epsilon = R::runif(epsilon_min, epsilon_max);
+    double epsilon = ws.rng.runif(epsilon_min, epsilon_max);
     epsilon_min = epsilon - M_2PI;
     
-    // Use pre-allocated workspace
     ws.theta_prime.set_size(horizon);
 
     while (reject) {
@@ -85,7 +84,7 @@ inline arma::vec draw_theta_ess_sparse_ws(const arma::vec& theta,
             } else {
                 epsilon_max = epsilon;
             }
-            epsilon = R::runif(epsilon_min, epsilon_max);
+            epsilon = ws.rng.runif(epsilon_min, epsilon_max);
         }
     }
     return ws.theta_prime;
@@ -100,7 +99,7 @@ arma::mat draw_theta(const arma::vec& theta_star,
                      const double& ls, const std::string& KERNEL,
                      const arma::field<arma::uvec>& obs_items,
                      CholeskyCache& chol_cache,
-                     Workspace& ws) {
+                     WorkspacePool& ws_pool) {
 
     arma::uword n = y.n_rows;
     arma::uword m = y.n_cols;
@@ -119,10 +118,18 @@ arma::mat draw_theta(const arma::vec& theta_star,
     }
     
     arma::mat V;
-    if(ls>=3*horizon){
+    if(ls >= 3*horizon){
         // CST: constant theta
         V.ones(1, 1);
+        
+        // Parallelize over respondents
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
         for (arma::uword i = 0; i < n; ++i){
+            int tid = get_thread_id();
+            Workspace& ws = ws_pool.get(tid);
+            
             arma::field<arma::uvec> obs_items_i(1);
             arma::uvec all_obs;
             for(arma::uword h = 0; h < horizon; ++h) {
@@ -131,9 +138,9 @@ arma::mat draw_theta(const arma::vec& theta_star,
             }
             obs_items_i(0) = all_obs;
             
-            arma::mat y_(m*horizon,1);
-            arma::cube fstar_(N, m*horizon,1);
-            arma::cube mu_star_(N, m*horizon,1);
+            arma::mat y_(m*horizon, 1);
+            arma::cube fstar_(N, m*horizon, 1);
+            arma::cube mu_star_(N, m*horizon, 1);
             
             for(arma::uword h = 0; h < horizon; ++h) {
                 y_.col(0).subvec(h*m, (h+1)*m-1) = y.slice(h).row(i).t();
@@ -143,8 +150,8 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 }
             }
             
-            arma::mat L_i = arma::chol(V+std::pow(theta_prior_sds(0,i),2), "lower");
-            arma::vec raw_theta_ess = draw_theta_ess_sparse_ws(
+            arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
+            arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
                 arma::vec(1, arma::fill::value(theta(i,0))), y_,
                 L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                 
@@ -152,10 +159,18 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
             }
         }
-    }else if(ls<=0.1){
+    } else if(ls <= 0.1){
         // RDM: independent theta
         V.ones(1, 1);
+        
+        // Parallelize over respondents
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
         for (arma::uword i = 0; i < n; ++i){
+            int tid = get_thread_id();
+            Workspace& ws = ws_pool.get(tid);
+            
             for (arma::uword h = 0; h < horizon; ++h){
                 arma::field<arma::uvec> obs_items_i(1);
                 obs_items_i(0) = obs_items(i, h);
@@ -167,24 +182,31 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 fstar_.slice(0) = fstar.slice(h);
                 mu_star_.slice(0) = mu_star.slice(h);
                 
-                arma::mat L_i = arma::chol(V+std::pow(theta_prior_sds(0,i),2), "lower");
-                arma::vec raw_theta_ess = draw_theta_ess_sparse_ws(
+                arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
+                arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
                     arma::vec(1, arma::fill::value(theta(i,h))), y_,
                     L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                     
                 result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
             }
         }
-    }else{
+    } else {
         // Regular GP case - use cached Cholesky
+        // Parallelize over respondents
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
         for (arma::uword i = 0; i < n; ++i){
+            int tid = get_thread_id();
+            Workspace& ws = ws_pool.get(tid);
+            
             arma::field<arma::uvec> obs_items_i(horizon);
             for(arma::uword h = 0; h < horizon; ++h) {
                 obs_items_i(h) = obs_items(i, h);
             }
             
             // Use cached L_time
-            arma::vec raw_theta_ess = draw_theta_ess_sparse_ws(
+            arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
                 theta.row(i).t(), y.row(i), 
                 chol_cache.L_time.slice(i), fstar, mu_star, thresholds,
                 obs_items_i, ws);
