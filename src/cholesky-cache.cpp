@@ -15,8 +15,8 @@ void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
     // Check if theta has changed significantly
     double theta_change = arma::norm(cache.theta_hash - theta, "fro");
     
-    // Only update if theta has changed by more than threshold
-    if (theta_change > 1e-6 || cache.needs_update) {
+    // Only update if theta has changed by more than threshold (0.01 for performance)
+    if (theta_change > 0.01 || cache.needs_update) {
         arma::uword n = theta.n_rows;
         arma::uword horizon = theta.n_cols;
         

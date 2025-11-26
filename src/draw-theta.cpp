@@ -7,12 +7,13 @@ inline double compute_ll_sparse(const double theta,
                                 const arma::mat& mu_star,
                                 const arma::mat& thresholds,
                                 const arma::uvec& obs_idx){
-    int theta_index = round((theta+5)/0.01);
+    // Coarse 0.1 grid spacing: multiply by 10 to index into original theta_star array
+    int theta_index = round((theta+5)/0.1) * 10;
     if(theta_index<0){
         theta_index = 0;
-    }else if (theta_index>1001)
+    }else if (theta_index>1000)
     {
-        theta_index=1001;
+        theta_index=1000;
     }
     
     arma::vec f_obs = fstar.row(theta_index).t();
@@ -156,7 +157,11 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                 
             for (arma::uword h = 0; h < horizon; ++h){
-                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
+                // Coarse 0.1 grid spacing
+                int idx = round((raw_theta_ess(0)+5)/0.1) * 10;
+                if(idx < 0) idx = 0;
+                if(idx > 1000) idx = 1000;
+                result(i, h) = theta_star[idx];
             }
         }
     } else if(ls <= 0.1){
@@ -187,7 +192,11 @@ arma::mat draw_theta(const arma::vec& theta_star,
                     arma::vec(1, arma::fill::value(theta(i,h))), y_,
                     L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                     
-                result(i, h) = theta_star[round((raw_theta_ess(0)+5)/0.01)];
+                // Coarse 0.1 grid spacing
+                int idx = round((raw_theta_ess(0)+5)/0.1) * 10;
+                if(idx < 0) idx = 0;
+                if(idx > 1000) idx = 1000;
+                result(i, h) = theta_star[idx];
             }
         }
     } else {
@@ -212,7 +221,11 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 obs_items_i, ws);
                 
             for (arma::uword h = 0; h < horizon; ++h){
-                result(i, h) = theta_star[round((raw_theta_ess(h)+5)/0.01)];
+                // Coarse 0.1 grid spacing
+                int idx = round((raw_theta_ess(h)+5)/0.1) * 10;
+                if(idx < 0) idx = 0;
+                if(idx > 1000) idx = 1000;
+                result(i, h) = theta_star[idx];
             }
         }
     }
