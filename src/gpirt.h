@@ -80,16 +80,30 @@ struct Workspace {
     arma::vec alpha;
     arma::vec draw_mean;
     
+    // Pre-allocated temporaries for draw functions
+    arma::vec result_col;
+    arma::mat X_obs;
+    arma::mat cholS_small;
+    arma::cube f_h;
+    arma::cube y_h;
+    arma::cube mu_h;
+    
     // Thread-safe RNG
     ThreadRNG rng;
     
     // Initialize with maximum expected sizes
     Workspace(arma::uword max_n, arma::uword max_m, arma::uword horizon) :
-        nu(max_n), f_prime(max_n), theta_prime(horizon),
+        nu(max_n * horizon), f_prime(max_n * horizon), theta_prime(horizon),
         beta_prime(3), delta_prime(10), // assuming max 10 categories
-        g(max_n), f_obs(max_m), mu_obs(max_m), y_obs(max_m),
-        tmp_mat(max_n, max_n), tmp_vec(max_n),
-        alpha(max_n), draw_mean(1001) {}  // 1001 for theta_star grid
+        g(max_n * horizon), f_obs(max_n * horizon), mu_obs(max_n * horizon), y_obs(max_n * horizon),
+        tmp_mat(max_n * horizon, 1001), tmp_vec(max_n * horizon),
+        alpha(max_n * horizon), draw_mean(1001),
+        result_col(max_n * horizon),
+        X_obs(max_n * horizon, 3),
+        cholS_small(3, 3),
+        f_h(max_n, 1, 1),
+        y_h(max_n, 1, 1),
+        mu_h(max_n, 1, 1) {}
         
     // Copy constructor for creating thread-local copies
     Workspace(const Workspace& other) :
@@ -100,7 +114,13 @@ struct Workspace {
         mu_obs(other.mu_obs.n_elem), y_obs(other.y_obs.n_elem),
         tmp_mat(other.tmp_mat.n_rows, other.tmp_mat.n_cols), 
         tmp_vec(other.tmp_vec.n_elem),
-        alpha(other.alpha.n_elem), draw_mean(other.draw_mean.n_elem) {}
+        alpha(other.alpha.n_elem), draw_mean(other.draw_mean.n_elem),
+        result_col(other.result_col.n_elem),
+        X_obs(other.X_obs.n_rows, other.X_obs.n_cols),
+        cholS_small(other.cholS_small.n_rows, other.cholS_small.n_cols),
+        f_h(other.f_h.n_rows, other.f_h.n_cols, other.f_h.n_slices),
+        y_h(other.y_h.n_rows, other.y_h.n_cols, other.y_h.n_slices),
+        mu_h(other.mu_h.n_rows, other.mu_h.n_cols, other.mu_h.n_slices) {}
 };
 
 // Thread workspace pool
@@ -155,49 +175,51 @@ inline int get_thread_id() {
 #endif
 }
 
-// Function to draw f with sparsity support and workspace pool
-arma::cube draw_f(const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
-                  CholeskyCache& chol_cache, const arma::mat& beta_prior_sds, 
-                  const arma::cube& mu, const arma::cube& thresholds, 
-                  const int constant_IRF,
-                  const arma::field<arma::uvec>& obs_items,
-                  WorkspacePool& ws_pool);
+// Function to draw f with sparsity support and workspace pool (writes to output reference)
+void draw_f(arma::cube& result, const arma::cube& f, const arma::mat& theta, const arma::cube& y, 
+            CholeskyCache& chol_cache, const arma::mat& beta_prior_sds, 
+            const arma::cube& mu, const arma::cube& thresholds, 
+            const int constant_IRF,
+            const arma::field<arma::uvec>& obs_persons,
+            const arma::field<arma::uvec>& obs_persons_combined,
+            WorkspacePool& ws_pool);
 
-// Function to draw fstar with workspace pool
-arma::cube draw_fstar(const arma::cube& f, 
-                      const arma::mat& theta,
-                      const arma::vec& theta_star, 
-                      const arma::mat& beta_prior_sds,
-                      CholeskyCache& chol_cache,
-                      const arma::cube& mu_star,
-                      const int constant_IRF,
-                      WorkspacePool& ws_pool);
+// Function to draw fstar with workspace pool (writes to output reference)
+void draw_fstar(arma::cube& results, const arma::cube& f, 
+                const arma::mat& theta,
+                const arma::vec& theta_star, 
+                const arma::mat& beta_prior_sds,
+                CholeskyCache& chol_cache,
+                const arma::cube& mu_star,
+                const int constant_IRF,
+                WorkspacePool& ws_pool);
 
-// Function to draw theta with sparsity support and workspace pool
-arma::mat draw_theta(const arma::vec& theta_star,
-                     const arma::cube& y, const arma::mat& theta,
-                     const arma::mat& theta_prior_sds,
-                     const arma::cube& fstar, const arma::cube& mu_star,
-                     const arma::cube& thresholds,
-                     const double& os,
-                     const double& ls, const std::string& KERNEL,
-                     const arma::field<arma::uvec>& obs_items,
-                     CholeskyCache& chol_cache,
-                     WorkspacePool& ws_pool);
+// Function to draw theta with sparsity support and workspace pool (writes to output reference)
+void draw_theta(arma::mat& result, const arma::vec& theta_star,
+                const arma::cube& y, const arma::mat& theta,
+                const arma::mat& theta_prior_sds,
+                const arma::cube& fstar, const arma::cube& mu_star,
+                const arma::cube& thresholds,
+                const double& os,
+                const double& ls, const std::string& KERNEL,
+                const arma::field<arma::uvec>& obs_items,
+                CholeskyCache& chol_cache,
+                WorkspacePool& ws_pool);
 
-// Function to draw beta with sparsity support and workspace pool
-arma::cube draw_beta(arma::cube& beta, const arma::cube& X,
-                    const arma::cube& y, const arma::cube& f,
-                    const arma::mat& prior_means, const arma::mat& prior_sds,
-                    const arma::cube& thresholds,
-                    const arma::field<arma::uvec>& obs_persons,
-                    WorkspacePool& ws_pool);
+// Function to draw beta with sparsity support and workspace pool (writes to output reference)
+void draw_beta(arma::cube& result, const arma::cube& beta, const arma::cube& X,
+               const arma::cube& y, const arma::cube& f,
+               const arma::mat& prior_means, const arma::mat& prior_sds,
+               const arma::cube& thresholds,
+               const arma::field<arma::uvec>& obs_persons,
+               WorkspacePool& ws_pool);
 
-// Function to draw thresholds with sparsity support and workspace pool
-arma::cube draw_threshold(const arma::cube& thresholds, const arma::cube& y,
+// Function to draw thresholds with sparsity support and workspace pool (writes to output reference)
+void draw_threshold(arma::cube& result, const arma::cube& thresholds, const arma::cube& y,
                     const arma::cube& f, const arma::cube& mu, 
                     const int constant_IRF,
                     const arma::field<arma::uvec>& obs_persons,
+                    const arma::field<arma::uvec>& obs_persons_combined,
                     WorkspacePool& ws_pool);
 
 // Utility function to update Cholesky cache if needed

@@ -35,19 +35,19 @@ inline double compute_ll_sparse(const double theta,
     return result;
 }
 
-inline arma::vec draw_theta_ess_sparse_threadsafe(const arma::vec& theta,
-                                                   const arma::mat& y,
-                                                   const arma::mat& L,
-                                                   const arma::cube& fstar,
-                                                   const arma::cube& mu_star,
-                                                   const arma::cube& thresholds,
-                                                   const arma::field<arma::uvec>& obs_items_i,
-                                                   Workspace& ws){
+inline void draw_theta_ess_sparse_threadsafe(arma::vec& out,
+                                             const arma::vec& theta,
+                                             const arma::mat& y,
+                                             const arma::mat& L,
+                                             const arma::cube& fstar,
+                                             const arma::cube& mu_star,
+                                             const arma::cube& thresholds,
+                                             const arma::field<arma::uvec>& obs_items_i,
+                                             Workspace& ws){
     arma::uword horizon = y.n_cols;
     
-    // Use thread-safe RNG
-    ws.nu.set_size(horizon);
-    ws.nu = rmvnorm_threadsafe(L, ws.rng);
+    // Use thread-safe RNG with pre-allocated workspace
+    ws.nu.head(horizon) = rmvnorm_threadsafe(L, ws.rng);
     
     double u = ws.rng.runif();
     double log_y = std::log(u);
@@ -63,12 +63,14 @@ inline arma::vec draw_theta_ess_sparse_threadsafe(const arma::vec& theta,
     double epsilon_max = M_2PI;
     double epsilon = ws.rng.runif(epsilon_min, epsilon_max);
     epsilon_min = epsilon - M_2PI;
-    
-    ws.theta_prime.set_size(horizon);
 
     while (reject) {
-        ws.theta_prime = theta * std::cos(epsilon) + ws.nu * std::sin(epsilon);
-        ws.theta_prime.clamp(-5.0, 5.0);
+        for (arma::uword h = 0; h < horizon; ++h) {
+            ws.theta_prime(h) = theta(h) * std::cos(epsilon) + ws.nu(h) * std::sin(epsilon);
+            // Clamp in-place
+            if (ws.theta_prime(h) < -5.0) ws.theta_prime(h) = -5.0;
+            if (ws.theta_prime(h) > 5.0) ws.theta_prime(h) = 5.0;
+        }
         
         double log_y_prime = 0;
         for (arma::uword h = 0; h < horizon; h++) {
@@ -88,25 +90,25 @@ inline arma::vec draw_theta_ess_sparse_threadsafe(const arma::vec& theta,
             epsilon = ws.rng.runif(epsilon_min, epsilon_max);
         }
     }
-    return ws.theta_prime;
+    
+    out = ws.theta_prime.head(horizon);
 }
 
-arma::mat draw_theta(const arma::vec& theta_star,
-                     const arma::cube& y, const arma::mat& theta,
-                     const arma::mat& theta_prior_sds,
-                     const arma::cube& fstar, const arma::cube& mu_star,
-                     const arma::cube& thresholds,
-                     const double& os,
-                     const double& ls, const std::string& KERNEL,
-                     const arma::field<arma::uvec>& obs_items,
-                     CholeskyCache& chol_cache,
-                     WorkspacePool& ws_pool) {
+void draw_theta(arma::mat& result, const arma::vec& theta_star,
+                const arma::cube& y, const arma::mat& theta,
+                const arma::mat& theta_prior_sds,
+                const arma::cube& fstar, const arma::cube& mu_star,
+                const arma::cube& thresholds,
+                const double& os,
+                const double& ls, const std::string& KERNEL,
+                const arma::field<arma::uvec>& obs_items,
+                CholeskyCache& chol_cache,
+                WorkspacePool& ws_pool) {
 
     arma::uword n = y.n_rows;
     arma::uword m = y.n_cols;
     arma::uword horizon = y.n_slices;
     arma::uword N = theta_star.n_elem;
-    arma::mat result(n, horizon);
     
     // Update time Cholesky factors if needed
     if (ls > 0.1 && ls < 3*horizon && chol_cache.needs_update) {
@@ -131,11 +133,20 @@ arma::mat draw_theta(const arma::vec& theta_star,
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
+            // Build observation indices without allocating new field
             arma::field<arma::uvec> obs_items_i(1);
             arma::uvec all_obs;
+            arma::uword total_obs = 0;
             for(arma::uword h = 0; h < horizon; ++h) {
-                arma::uvec h_obs = obs_items(i, h);
-                all_obs = arma::join_cols(all_obs, h_obs + h*m);
+                total_obs += obs_items(i, h).n_elem;
+            }
+            all_obs.set_size(total_obs);
+            arma::uword pos = 0;
+            for(arma::uword h = 0; h < horizon; ++h) {
+                const arma::uvec& h_obs = obs_items(i, h);
+                for(arma::uword k = 0; k < h_obs.n_elem; ++k) {
+                    all_obs(pos++) = h_obs(k) + h*m;
+                }
             }
             obs_items_i(0) = all_obs;
             
@@ -152,7 +163,8 @@ arma::mat draw_theta(const arma::vec& theta_star,
             }
             
             arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
-            arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
+            arma::vec raw_theta_ess(1);
+            draw_theta_ess_sparse_threadsafe(raw_theta_ess,
                 arma::vec(1, arma::fill::value(theta(i,0))), y_,
                 L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                 
@@ -188,7 +200,8 @@ arma::mat draw_theta(const arma::vec& theta_star,
                 mu_star_.slice(0) = mu_star.slice(h);
                 
                 arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
-                arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
+                arma::vec raw_theta_ess(1);
+                draw_theta_ess_sparse_threadsafe(raw_theta_ess,
                     arma::vec(1, arma::fill::value(theta(i,h))), y_,
                     L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                     
@@ -215,7 +228,8 @@ arma::mat draw_theta(const arma::vec& theta_star,
             }
             
             // Use cached L_time
-            arma::vec raw_theta_ess = draw_theta_ess_sparse_threadsafe(
+            arma::vec raw_theta_ess(horizon);
+            draw_theta_ess_sparse_threadsafe(raw_theta_ess,
                 theta.row(i).t(), y.row(i), 
                 chol_cache.L_time.slice(i), fstar, mu_star, thresholds,
                 obs_items_i, ws);
@@ -229,6 +243,4 @@ arma::mat draw_theta(const arma::vec& theta_star,
             }
         }
     }
-    
-    return result;
 }

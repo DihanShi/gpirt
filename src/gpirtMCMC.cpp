@@ -66,6 +66,27 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
     }
 
+    // Pre-compute combined observation indices for constant_IRF case
+    // This avoids repeated allocation/deallocation in the MCMC loop
+    arma::field<arma::uvec> obs_persons_combined(m, 1);
+    for (arma::uword j = 0; j < m; ++j) {
+        // Count total observations
+        arma::uword total_obs = 0;
+        for (arma::uword h = 0; h < horizon; ++h) {
+            total_obs += obs_persons(j, h).n_elem;
+        }
+        // Pre-allocate and fill
+        arma::uvec all_obs(total_obs);
+        arma::uword pos = 0;
+        for (arma::uword h = 0; h < horizon; ++h) {
+            const arma::uvec& h_obs = obs_persons(j, h);
+            for (arma::uword k = 0; k < h_obs.n_elem; ++k) {
+                all_obs(pos++) = h_obs(k) + h * n;
+            }
+        }
+        obs_persons_combined(j, 0) = all_obs;
+    }
+
     double avg_obs = arma::mean(arma::vectorise(n_obs));
     Rcpp::Rcout << "Sparsity: Average " << avg_obs << " out of " 
                 << m << " items observed per respondent ("
@@ -156,7 +177,15 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
     
-    arma::cube f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
+    // Pre-allocate working arrays that will be reused each iteration
+    arma::cube f_star(N, m, horizon);
+    arma::cube f_new(n, m, horizon);
+    arma::mat theta_new(n, horizon);
+    arma::cube beta_new(3, m, horizon);
+    arma::cube thresholds_new(m, thresholds.n_cols, horizon);
+    
+    // Initial f_star draw
+    draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
     Rcpp::Rcout << "start running gpirtMCMC...\n";
 
     // Setup results storage
@@ -179,12 +208,16 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         // Seed all thread RNGs with iteration-based seeds for reproducibility
         ws_pool.seed_all(static_cast<unsigned int>(iter * 10000));
 
-        // Draw with cached Cholesky and workspace pool
-        f      = draw_f(f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
-                       constant_IRF, obs_persons, ws_pool);
-        f_star = draw_fstar(f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
-        theta  = draw_theta(theta_star, y, theta, theta_prior_sds, f_star, 
-                           mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws_pool);
+        // Draw with cached Cholesky and workspace pool - using output references
+        draw_f(f_new, f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
+               constant_IRF, obs_persons, obs_persons_combined, ws_pool);
+        f = f_new;  // Copy result back
+        
+        draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
+        
+        draw_theta(theta_new, theta_star, y, theta, theta_prior_sds, f_star, 
+                   mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws_pool);
+        theta = theta_new;  // Copy result back
         
         // update X from theta
         X.col(1) = theta;
@@ -198,8 +231,9 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             }
         }
         
-        beta = draw_beta(beta, X, y, f, beta_prior_means, beta_prior_sds, 
-                        thresholds, obs_persons, ws_pool);
+        draw_beta(beta_new, beta, X, y, f, beta_prior_means, beta_prior_sds, 
+                  thresholds, obs_persons, ws_pool);
+        beta = beta_new;  // Copy result back
         
         // Update mu
         for (arma::uword h = 0; h < horizon; h++){
@@ -211,7 +245,9 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         chol_cache.needs_update = true;
         update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
 
-        thresholds = draw_threshold(thresholds, y, f, mu, constant_IRF, obs_persons, ws_pool);
+        draw_threshold(thresholds_new, thresholds, y, f, mu, constant_IRF, 
+                       obs_persons, obs_persons_combined, ws_pool);
+        thresholds = thresholds_new;  // Copy result back
         
         // Compute log likelihood
         double ll = 0;

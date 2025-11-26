@@ -1,19 +1,21 @@
 #include "gpirt.h"
 #include "mvnormal.h"
 
-arma::cube draw_fstar(const arma::cube& f, 
-                      const arma::mat& theta,
-                      const arma::vec& theta_star, 
-                      const arma::mat& beta_prior_sds,
-                      CholeskyCache& chol_cache,
-                      const arma::cube& mu_star,
-                      const int constant_IRF,
-                      WorkspacePool& ws_pool) {
+void draw_fstar(arma::cube& results, const arma::cube& f, 
+                const arma::mat& theta,
+                const arma::vec& theta_star, 
+                const arma::mat& beta_prior_sds,
+                CholeskyCache& chol_cache,
+                const arma::cube& mu_star,
+                const int constant_IRF,
+                WorkspacePool& ws_pool) {
     arma::uword n = f.n_rows;
     arma::uword horizon = f.n_slices;
     arma::uword m = f.n_cols;
     arma::uword N = theta_star.n_elem;
-    arma::cube results = arma::zeros<arma::cube>(N, m, horizon);
+    
+    // Zero out results (reusing pre-allocated memory)
+    results.zeros();
     
     if (constant_IRF == 0) {
         for (arma::uword h = 0; h < horizon; ++h) {
@@ -38,14 +40,12 @@ arma::cube draw_fstar(const arma::cube& f,
                 int tid = get_thread_id();
                 Workspace& ws = ws_pool.get(tid);
                 
-                // Compute item-specific mean
-                ws.alpha.set_size(n);
-                ws.alpha = double_solve(L, f.slice(h).col(j));
-                ws.draw_mean.set_size(N);
-                ws.draw_mean = kstarT * ws.alpha + mu_star.slice(h).col(j);
+                // Compute item-specific mean using pre-allocated workspace
+                ws.alpha.head(n) = double_solve(L, f.slice(h).col(j));
+                ws.draw_mean.head(N) = kstarT * ws.alpha.head(n) + mu_star.slice(h).col(j);
                 
                 // Draw from posterior
-                results.slice(h).col(j) = ws.draw_mean + rmvnorm_threadsafe(L_post, ws.rng);
+                results.slice(h).col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
             }
         }
     } else {
@@ -62,8 +62,7 @@ arma::cube draw_fstar(const arma::cube& f,
         
         int n_induced_points = 100;
         arma::mat f_constant(n_induced_points, m);
-        arma::vec theta_constant(n_induced_points);
-        theta_constant = arma::linspace(theta.min(), theta.max(), n_induced_points);
+        arma::vec theta_constant = arma::linspace(theta.min(), theta.max(), n_induced_points);
         
         for (arma::uword j = 0; j < m; ++j) {
             arma::vec points;
@@ -94,20 +93,16 @@ arma::cube draw_fstar(const arma::cube& f,
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            // Compute item-specific mean
-            ws.alpha.set_size(n_induced_points);
-            ws.alpha = double_solve(L_constant, f_constant.col(j));
-            ws.draw_mean.set_size(N);
-            ws.draw_mean = kstarT * ws.alpha + mu_star.slice(0).col(j);
+            // Compute item-specific mean using pre-allocated workspace
+            ws.alpha.head(n_induced_points) = double_solve(L_constant, f_constant.col(j));
+            ws.draw_mean.head(N) = kstarT * ws.alpha.head(n_induced_points) + mu_star.slice(0).col(j);
             
             // Draw from posterior
-            f_star.col(j) = ws.draw_mean + rmvnorm_threadsafe(L_post, ws.rng);
+            f_star.col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
         }
 
         for (arma::uword h = 0; h < horizon; ++h) {
             results.slice(h) = f_star;
         }
     }
-    
-    return results;
 }
