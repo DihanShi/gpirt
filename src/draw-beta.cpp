@@ -71,9 +71,11 @@ void draw_beta(arma::cube& result, const arma::cube& beta, const arma::cube& X,
             const arma::uvec& obs_idx = obs_persons(j, h);
             
             if(obs_idx.n_elem > 0) {
-                // Extract observed data using subviews where possible
-                arma::vec f_obs = f.slice(h).col(j).elem(obs_idx);
-                arma::vec y_obs = y.slice(h).col(j).elem(obs_idx);
+                // Extract observed data - convert subview to vec first
+                arma::vec f_col = f.slice(h).col(j);
+                arma::vec y_col = y.slice(h).col(j);
+                arma::vec f_obs = f_col.elem(obs_idx);
+                arma::vec y_obs = y_col.elem(obs_idx);
                 arma::mat X_obs = X.slice(h).rows(obs_idx);
                 
                 // Compute Cholesky using workspace (reuse cholS_small)
