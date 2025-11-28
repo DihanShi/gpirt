@@ -63,25 +63,34 @@ void draw_f(arma::cube& result, const arma::cube& f, const arma::mat& theta, con
             
             // Parallelize over items
             #ifdef _OPENMP
-            #pragma omp parallel for schedule(dynamic)
+            #pragma omp parallel
             #endif
-            for (arma::uword j = 0; j < m; ++j) {
+            {
                 int tid = get_thread_id();
                 Workspace& ws = ws_pool.get(tid);
                 
-                // Use const reference to avoid copy
-                const arma::uvec& obs_idx = obs_persons(j, h);
-                
+                // Thread-local pre-allocated vector
                 arma::vec result_col(n);
-                ess_sparse_threadsafe(result_col, f.slice(h).col(j), y.slice(h).col(j), 
-                                     L_h, mu.slice(h).col(j), thresholds.slice(h).row(j).t(),
-                                     obs_idx, ws);
-                result.slice(h).col(j) = result_col;
+                
+                #ifdef _OPENMP
+                #pragma omp for schedule(dynamic)
+                #endif
+                for (arma::uword j = 0; j < m; ++j) {
+                    // Use const reference to avoid copy
+                    const arma::uvec& obs_idx = obs_persons(j, h);
+                    
+                    ess_sparse_threadsafe(result_col, f.slice(h).col(j), y.slice(h).col(j), 
+                                         L_h, mu.slice(h).col(j), thresholds.slice(h).row(j).t(),
+                                         obs_idx, ws);
+                    result.slice(h).col(j) = result_col;
+                }
             }
         }
     } else {
         // For constant IRF case, build combined data
         arma::uword n_combined = n * horizon;
+        
+        // FIX: Allocate these ONCE outside any loop
         arma::mat f_constant(n_combined, m);
         arma::mat y_constant(n_combined, m);
         arma::mat mu_constant(n_combined, m);
@@ -105,20 +114,27 @@ void draw_f(arma::cube& result, const arma::cube& f, const arma::mat& theta, con
         arma::mat f_prime(n_combined, m);
         
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword j = 0; j < m; ++j) {
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            // Use pre-computed combined observation indices (const reference)
-            const arma::uvec& obs_idx = obs_persons_combined(j, 0);
-            
+            // Thread-local pre-allocated vector
             arma::vec result_col(n_combined);
-            ess_sparse_threadsafe(result_col, f_constant.col(j), y_constant.col(j),
-                                 L_constant, mu_constant.col(j), thresholds.slice(0).row(j).t(),
-                                 obs_idx, ws);
-            f_prime.col(j) = result_col;
+            
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword j = 0; j < m; ++j) {
+                // Use pre-computed combined observation indices (const reference)
+                const arma::uvec& obs_idx = obs_persons_combined(j, 0);
+                
+                ess_sparse_threadsafe(result_col, f_constant.col(j), y_constant.col(j),
+                                     L_constant, mu_constant.col(j), thresholds.slice(0).row(j).t(),
+                                     obs_idx, ws);
+                f_prime.col(j) = result_col;
+            }
         }
 
         for (arma::uword h = 0; h < horizon; ++h) {

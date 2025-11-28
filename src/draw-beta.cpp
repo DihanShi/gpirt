@@ -59,41 +59,60 @@ void draw_beta(arma::cube& result, const arma::cube& beta, const arma::cube& X,
     for (arma::uword h = 0; h < horizon; h++) {
         // Parallelize over items
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword j = 0; j < m; ++j) {
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            // Use const reference to avoid copy
-            const arma::uvec& obs_idx = obs_persons(j, h);
+            // Thread-local pre-allocated storage
+            arma::vec beta_new(p);
+            arma::vec f_obs;
+            arma::vec y_obs;
+            arma::mat X_obs;
             
-            if(obs_idx.n_elem > 0) {
-                // Extract observed data - need to convert subview to vec first for elem()
-                arma::vec f_col = f.slice(h).col(j);
-                arma::vec y_col = y.slice(h).col(j);
-                arma::vec f_obs = f_col.elem(obs_idx);
-                arma::vec y_obs = y_col.elem(obs_idx);
-                arma::mat X_obs = X.slice(h).rows(obs_idx);
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword j = 0; j < m; ++j) {
+                // Use const reference to avoid copy
+                const arma::uvec& obs_idx = obs_persons(j, h);
                 
-                // Compute Cholesky using workspace
-                ws.cholS_small.zeros(3, 3);
-                ws.cholS_small.diag() = prior_sds.col(j);
-                ws.cholS_small = arma::powmat(ws.cholS_small, 2);
-                ws.cholS_small.diag() += 1e-6;
-                ws.cholS_small = arma::chol(ws.cholS_small, "lower");
-                
-                // Create valid indices for the extracted observations
-                arma::uvec valid_idx = arma::regspace<arma::uvec>(0, obs_idx.n_elem-1);
-                
-                arma::vec beta_new(p);
-                draw_beta_ess_sparse_threadsafe(beta_new,
-                    beta.slice(h).col(j), f_obs, y_obs, ws.cholS_small, X_obs, 
-                    thresholds.slice(h).row(j).t(), valid_idx, ws);
+                if(obs_idx.n_elem > 0) {
+                    // Extract observed data - resize local vectors as needed
+                    arma::uword n_obs = obs_idx.n_elem;
+                    if (f_obs.n_elem != n_obs) {
+                        f_obs.set_size(n_obs);
+                        y_obs.set_size(n_obs);
+                        X_obs.set_size(n_obs, 3);
+                    }
                     
-                result.slice(h).col(j) = beta_new;
-            } else {
-                result.slice(h).col(j) = beta.slice(h).col(j);
+                    // Extract data for observed indices
+                    for (arma::uword k = 0; k < n_obs; ++k) {
+                        arma::uword idx = obs_idx(k);
+                        f_obs(k) = f(idx, j, h);
+                        y_obs(k) = y(idx, j, h);
+                        X_obs.row(k) = X.slice(h).row(idx);
+                    }
+                    
+                    // Compute Cholesky using workspace
+                    ws.cholS_small.zeros(3, 3);
+                    ws.cholS_small.diag() = prior_sds.col(j);
+                    ws.cholS_small = arma::powmat(ws.cholS_small, 2);
+                    ws.cholS_small.diag() += 1e-6;
+                    ws.cholS_small = arma::chol(ws.cholS_small, "lower");
+                    
+                    // Create valid indices for the extracted observations
+                    arma::uvec valid_idx = arma::regspace<arma::uvec>(0, n_obs-1);
+                    
+                    draw_beta_ess_sparse_threadsafe(beta_new,
+                        beta.slice(h).col(j), f_obs, y_obs, ws.cholS_small, X_obs, 
+                        thresholds.slice(h).row(j).t(), valid_idx, ws);
+                        
+                    result.slice(h).col(j) = beta_new;
+                } else {
+                    result.slice(h).col(j) = beta.slice(h).col(j);
+                }
             }
         }
     }

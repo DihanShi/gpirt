@@ -8,25 +8,18 @@ inline double compute_ll_sparse(const double theta,
                                 const arma::mat& thresholds,
                                 const arma::uvec& obs_idx){
     // Coarse 0.1 grid spacing: multiply by 10 to index into original theta_star array
-    int theta_index = round((theta+5)/0.1) * 10;
-    if(theta_index<0){
+    int theta_index = static_cast<int>(round((theta + 5.0) / 0.1)) * 10;
+    if(theta_index < 0){
         theta_index = 0;
-    }else if (theta_index>1000)
-    {
-        theta_index=1000;
+    } else if (theta_index > 1000) {
+        theta_index = 1000;
     }
-    
-    arma::vec f_obs = fstar.row(theta_index).t();
-    arma::vec mu_obs = mu_star.row(theta_index).t();
-    f_obs = f_obs(obs_idx);
-    mu_obs = mu_obs(obs_idx);
-    arma::vec y_obs = y(obs_idx);
     
     double result = 0.0;
     for(arma::uword idx = 0; idx < obs_idx.n_elem; ++idx) {
         arma::uword j = obs_idx(idx);
-        int c = int(y_obs(idx));
-        double g = f_obs(idx) + mu_obs(idx);
+        int c = static_cast<int>(y(j));
+        double g = fstar(theta_index, j) + mu_star(theta_index, j);
         double z1 = thresholds(j, c-1) - g;
         double z2 = thresholds(j, c) - g;
         result += std::log(R::pnorm(z2, 0, 1, 1, 0) - 
@@ -120,126 +113,150 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
         }
     }
     
-    arma::mat V;
     if(ls >= 3*horizon){
         // CST: constant theta
-        V.ones(1, 1);
+        arma::mat V(1, 1, arma::fill::ones);
         
-        // Parallelize over respondents
+        // Pre-allocate thread-local storage outside the parallel region
+        // FIX: Moved allocation outside parallel loop
+        
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword i = 0; i < n; ++i){
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            // Build observation indices without allocating new field
-            arma::field<arma::uvec> obs_items_i(1);
-            arma::uvec all_obs;
-            arma::uword total_obs = 0;
-            for(arma::uword h = 0; h < horizon; ++h) {
-                total_obs += obs_items(i, h).n_elem;
-            }
-            all_obs.set_size(total_obs);
-            arma::uword pos = 0;
-            for(arma::uword h = 0; h < horizon; ++h) {
-                const arma::uvec& h_obs = obs_items(i, h);
-                for(arma::uword k = 0; k < h_obs.n_elem; ++k) {
-                    all_obs(pos++) = h_obs(k) + h*m;
-                }
-            }
-            obs_items_i(0) = all_obs;
-            
-            arma::mat y_(m*horizon, 1);
-            arma::cube fstar_(N, m*horizon, 1);
-            arma::cube mu_star_(N, m*horizon, 1);
-            
-            for(arma::uword h = 0; h < horizon; ++h) {
-                y_.col(0).subvec(h*m, (h+1)*m-1) = y.slice(h).row(i).t();
-                for(arma::uword k = 0; k < N; ++k) {
-                    fstar_.slice(0).row(k).subvec(h*m, (h+1)*m-1) = fstar.slice(h).row(k);
-                    mu_star_.slice(0).row(k).subvec(h*m, (h+1)*m-1) = mu_star.slice(h).row(k);
-                }
-            }
-            
-            arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
+            // Thread-local pre-allocated storage
+            arma::field<arma::uvec> obs_items_i_local(1);
+            arma::mat y_local(m*horizon, 1);
+            arma::cube fstar_local(N, m*horizon, 1);
+            arma::cube mu_star_local(N, m*horizon, 1);
+            arma::uvec all_obs_local(m*horizon); // Max possible size
             arma::vec raw_theta_ess(1);
-            draw_theta_ess_sparse_threadsafe(raw_theta_ess,
-                arma::vec(1, arma::fill::value(theta(i,0))), y_,
-                L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
+            
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword i = 0; i < n; ++i){
+                // Count total observations for this respondent
+                arma::uword total_obs = 0;
+                for(arma::uword h = 0; h < horizon; ++h) {
+                    total_obs += obs_items(i, h).n_elem;
+                }
                 
-            for (arma::uword h = 0; h < horizon; ++h){
-                // Coarse 0.1 grid spacing
-                int idx = round((raw_theta_ess(0)+5)/0.1) * 10;
-                if(idx < 0) idx = 0;
-                if(idx > 1000) idx = 1000;
-                result(i, h) = theta_star[idx];
+                // Build observation indices using pre-allocated storage
+                arma::uword pos = 0;
+                for(arma::uword h = 0; h < horizon; ++h) {
+                    const arma::uvec& h_obs = obs_items(i, h);
+                    for(arma::uword k = 0; k < h_obs.n_elem; ++k) {
+                        all_obs_local(pos++) = h_obs(k) + h*m;
+                    }
+                }
+                obs_items_i_local(0) = all_obs_local.head(total_obs);
+                
+                // Build combined data
+                for(arma::uword h = 0; h < horizon; ++h) {
+                    y_local.col(0).subvec(h*m, (h+1)*m-1) = y.slice(h).row(i).t();
+                    for(arma::uword k = 0; k < N; ++k) {
+                        fstar_local.slice(0).row(k).subvec(h*m, (h+1)*m-1) = fstar.slice(h).row(k);
+                        mu_star_local.slice(0).row(k).subvec(h*m, (h+1)*m-1) = mu_star.slice(h).row(k);
+                    }
+                }
+                
+                double prior_var = V(0,0) + std::pow(theta_prior_sds(0,i), 2);
+                arma::mat L_i(1, 1);
+                L_i(0, 0) = std::sqrt(prior_var);
+                
+                draw_theta_ess_sparse_threadsafe(raw_theta_ess,
+                    arma::vec(1, arma::fill::value(theta(i,0))), y_local,
+                    L_i, fstar_local, mu_star_local, thresholds, obs_items_i_local, ws);
+                    
+                for (arma::uword h = 0; h < horizon; ++h){
+                    int idx = static_cast<int>(round((raw_theta_ess(0)+5)/0.1)) * 10;
+                    if(idx < 0) idx = 0;
+                    if(idx > 1000) idx = 1000;
+                    result(i, h) = theta_star(idx);
+                }
             }
         }
     } else if(ls <= 0.1){
         // RDM: independent theta
-        V.ones(1, 1);
+        arma::mat V(1, 1, arma::fill::ones);
         
-        // Parallelize over respondents
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword i = 0; i < n; ++i){
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            for (arma::uword h = 0; h < horizon; ++h){
-                arma::field<arma::uvec> obs_items_i(1);
-                obs_items_i(0) = obs_items(i, h);
-                
-                arma::mat y_(m, 1);
-                y_.col(0) = y.slice(h).row(i).t();
-                arma::cube fstar_(N, m, 1);
-                arma::cube mu_star_(N, m, 1);
-                fstar_.slice(0) = fstar.slice(h);
-                mu_star_.slice(0) = mu_star.slice(h);
-                
-                arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
-                arma::vec raw_theta_ess(1);
-                draw_theta_ess_sparse_threadsafe(raw_theta_ess,
-                    arma::vec(1, arma::fill::value(theta(i,h))), y_,
-                    L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
+            // Thread-local pre-allocated storage
+            arma::field<arma::uvec> obs_items_i_local(1);
+            arma::mat y_local(m, 1);
+            arma::cube fstar_local(N, m, 1);
+            arma::cube mu_star_local(N, m, 1);
+            arma::vec raw_theta_ess(1);
+            
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword i = 0; i < n; ++i){
+                for (arma::uword h = 0; h < horizon; ++h){
+                    obs_items_i_local(0) = obs_items(i, h);
                     
-                // Coarse 0.1 grid spacing
-                int idx = round((raw_theta_ess(0)+5)/0.1) * 10;
-                if(idx < 0) idx = 0;
-                if(idx > 1000) idx = 1000;
-                result(i, h) = theta_star[idx];
+                    y_local.col(0) = y.slice(h).row(i).t();
+                    fstar_local.slice(0) = fstar.slice(h);
+                    mu_star_local.slice(0) = mu_star.slice(h);
+                    
+                    double prior_var = V(0,0) + std::pow(theta_prior_sds(0,i), 2);
+                    arma::mat L_i(1, 1);
+                    L_i(0, 0) = std::sqrt(prior_var);
+                    
+                    draw_theta_ess_sparse_threadsafe(raw_theta_ess,
+                        arma::vec(1, arma::fill::value(theta(i,h))), y_local,
+                        L_i, fstar_local, mu_star_local, thresholds, obs_items_i_local, ws);
+                        
+                    int idx = static_cast<int>(round((raw_theta_ess(0)+5)/0.1)) * 10;
+                    if(idx < 0) idx = 0;
+                    if(idx > 1000) idx = 1000;
+                    result(i, h) = theta_star(idx);
+                }
             }
         }
     } else {
         // Regular GP case - use cached Cholesky
-        // Parallelize over respondents
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword i = 0; i < n; ++i){
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            arma::field<arma::uvec> obs_items_i(horizon);
-            for(arma::uword h = 0; h < horizon; ++h) {
-                obs_items_i(h) = obs_items(i, h);
-            }
-            
-            // Use cached L_time
+            // Thread-local pre-allocated storage
+            arma::field<arma::uvec> obs_items_i_local(horizon);
             arma::vec raw_theta_ess(horizon);
-            draw_theta_ess_sparse_threadsafe(raw_theta_ess,
-                theta.row(i).t(), y.row(i), 
-                chol_cache.L_time.slice(i), fstar, mu_star, thresholds,
-                obs_items_i, ws);
+            
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword i = 0; i < n; ++i){
+                for(arma::uword h = 0; h < horizon; ++h) {
+                    obs_items_i_local(h) = obs_items(i, h);
+                }
                 
-            for (arma::uword h = 0; h < horizon; ++h){
-                // Coarse 0.1 grid spacing
-                int idx = round((raw_theta_ess(h)+5)/0.1) * 10;
-                if(idx < 0) idx = 0;
-                if(idx > 1000) idx = 1000;
-                result(i, h) = theta_star[idx];
+                // Use cached L_time
+                draw_theta_ess_sparse_threadsafe(raw_theta_ess,
+                    theta.row(i).t(), y.row(i), 
+                    chol_cache.L_time.slice(i), fstar, mu_star, thresholds,
+                    obs_items_i_local, ws);
+                    
+                for (arma::uword h = 0; h < horizon; ++h){
+                    int idx = static_cast<int>(round((raw_theta_ess(h)+5)/0.1)) * 10;
+                    if(idx < 0) idx = 0;
+                    if(idx > 1000) idx = 1000;
+                    result(i, h) = theta_star(idx);
+                }
             }
         }
     }

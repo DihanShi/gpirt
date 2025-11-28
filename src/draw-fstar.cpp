@@ -34,22 +34,28 @@ void draw_fstar(arma::cube& results, const arma::cube& f,
             
             // Parallelize over items
             #ifdef _OPENMP
-            #pragma omp parallel for schedule(dynamic)
+            #pragma omp parallel
             #endif
-            for (arma::uword j = 0; j < m; ++j) {
+            {
                 int tid = get_thread_id();
                 Workspace& ws = ws_pool.get(tid);
                 
-                // Compute item-specific mean using pre-allocated workspace
-                ws.alpha.head(n) = double_solve(L, f.slice(h).col(j));
-                ws.draw_mean.head(N) = kstarT * ws.alpha.head(n) + mu_star.slice(h).col(j);
-                
-                // Draw from posterior
-                results.slice(h).col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
+                #ifdef _OPENMP
+                #pragma omp for schedule(dynamic)
+                #endif
+                for (arma::uword j = 0; j < m; ++j) {
+                    // Compute item-specific mean using pre-allocated workspace
+                    ws.alpha.head(n) = double_solve(L, f.slice(h).col(j));
+                    ws.draw_mean.head(N) = kstarT * ws.alpha.head(n) + mu_star.slice(h).col(j);
+                    
+                    // Draw from posterior
+                    results.slice(h).col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
+                }
             }
         }
     } else {
         // Constant IRF case with inducing points
+        // FIX: Allocate these ONCE
         arma::mat f_constant_all(n*horizon, m);
         arma::vec theta_constant_all(n*horizon);
         
@@ -87,18 +93,23 @@ void draw_fstar(arma::cube& results, const arma::cube& f,
         arma::mat f_star(N, m);
         
         #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel
         #endif
-        for (arma::uword j = 0; j < m; ++j) {
+        {
             int tid = get_thread_id();
             Workspace& ws = ws_pool.get(tid);
             
-            // Compute item-specific mean using pre-allocated workspace
-            ws.alpha.head(n_induced_points) = double_solve(L_constant, f_constant.col(j));
-            ws.draw_mean.head(N) = kstarT * ws.alpha.head(n_induced_points) + mu_star.slice(0).col(j);
-            
-            // Draw from posterior
-            f_star.col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
+            #ifdef _OPENMP
+            #pragma omp for schedule(dynamic)
+            #endif
+            for (arma::uword j = 0; j < m; ++j) {
+                // Compute item-specific mean using pre-allocated workspace
+                ws.alpha.head(n_induced_points) = double_solve(L_constant, f_constant.col(j));
+                ws.draw_mean.head(N) = kstarT * ws.alpha.head(n_induced_points) + mu_star.slice(0).col(j);
+                
+                // Draw from posterior
+                f_star.col(j) = ws.draw_mean.head(N) + rmvnorm_threadsafe(L_post, ws.rng);
+            }
         }
 
         for (arma::uword h = 0; h < horizon; ++h) {

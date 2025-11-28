@@ -40,6 +40,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::uword m = y.n_cols;
     arma::uword horizon = y.n_slices;
     int total_iterations = sample_iterations + burn_iterations;
+    int n_stored = int(sample_iterations/THIN);
 
     // Get number of threads
     int num_threads = get_num_threads();
@@ -67,15 +68,12 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     }
 
     // Pre-compute combined observation indices for constant_IRF case
-    // This avoids repeated allocation/deallocation in the MCMC loop
     arma::field<arma::uvec> obs_persons_combined(m, 1);
     for (arma::uword j = 0; j < m; ++j) {
-        // Count total observations
         arma::uword total_obs = 0;
         for (arma::uword h = 0; h < horizon; ++h) {
             total_obs += obs_persons(j, h).n_elem;
         }
-        // Pre-allocate and fill
         arma::uvec all_obs(total_obs);
         arma::uword pos = 0;
         for (arma::uword h = 0; h < horizon; ++h) {
@@ -84,7 +82,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
                 all_obs(pos++) = h_obs(k) + h * n;
             }
         }
-        obs_persons_combined(j, 0) = all_obs;
+        obs_persons_combined(j, 0) = std::move(all_obs);
     }
 
     double avg_obs = arma::mean(arma::vectorise(n_obs));
@@ -120,7 +118,6 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
         for (arma::uword h = 0; h < horizon; h++){
             for ( arma::uword j = 0; j < m; ++j ) {
-                // Use cached Cholesky
                 f.slice(h).col(j) = rmvnorm(chol_cache.L.slice(h));
             }
         }
@@ -178,6 +175,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     }
     
     // Pre-allocate working arrays that will be reused each iteration
+    // FIX: These are now allocated ONCE outside the loop
     arma::cube f_star(N, m, horizon);
     arma::cube f_new(n, m, horizon);
     arma::mat theta_new(n, horizon);
@@ -188,13 +186,22 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
     Rcpp::Rcout << "start running gpirtMCMC...\n";
 
-    // Setup results storage
-    arma::cube              theta_draws(int(sample_iterations/THIN), n, y.n_slices);
-    arma::field<arma::cube> beta_draws(int(sample_iterations/THIN));
-    arma::field<arma::cube> f_draws(int(sample_iterations/THIN));
-    arma::field<arma::cube> fstar_draws(int(sample_iterations/THIN));
-    arma::field<arma::cube> threshold_draws(int(sample_iterations/THIN));
-    arma::vec               ll_draws(int(sample_iterations/THIN));
+    // Setup results storage - PRE-ALLOCATE all storage upfront
+    // FIX: Use fixed-size arrays instead of growing fields
+    arma::cube theta_draws(n_stored, n, horizon);
+    arma::field<arma::cube> beta_draws(n_stored);
+    arma::field<arma::cube> f_draws(n_stored);
+    arma::field<arma::cube> fstar_draws(n_stored);
+    arma::field<arma::cube> threshold_draws(n_stored);
+    arma::vec ll_draws(n_stored);
+    
+    // Pre-allocate the cubes in the fields to avoid repeated allocation
+    for (int i = 0; i < n_stored; ++i) {
+        beta_draws(i) = arma::cube(3, m, horizon);
+        f_draws(i) = arma::cube(n, m, horizon);
+        fstar_draws(i) = arma::cube(N, m, horizon);
+        threshold_draws(i) = arma::cube(m, thresholds.n_cols, horizon);
+    }
 
     double progress_increment = (1.0 / total_iterations) * 100.0;
     double progress = 0.0;
@@ -209,31 +216,40 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         ws_pool.seed_all(static_cast<unsigned int>(iter * 10000));
 
         // Draw with cached Cholesky and workspace pool - using output references
+        // FIX: Reuse pre-allocated arrays instead of creating new ones
         draw_f(f_new, f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
                constant_IRF, obs_persons, obs_persons_combined, ws_pool);
-        f = f_new;  // Copy result back
+        
+        // FIX: Use swap instead of copy to avoid allocation
+        f.swap(f_new);
         
         draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
         
         draw_theta(theta_new, theta_star, y, theta, theta_prior_sds, f_star, 
                    mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws_pool);
-        theta = theta_new;  // Copy result back
+        
+        // FIX: Use swap instead of copy
+        theta.swap(theta_new);
         
         // update X from theta
         X.col(1) = theta;
         X.col(2) = arma::pow(theta, 2);
 
-        // Update f for new theta
-        arma::mat idx = (theta+5)/0.01;
+        // Update f for new theta - use direct indexing without creating idx matrix
         for (arma::uword k = 0; k < n; ++k){
             for (arma::uword h = 0; h < horizon; ++h){
-                f.slice(h).row(k) = f_star.slice(h).row(round(idx(k, h)));
+                int idx_val = static_cast<int>(round((theta(k, h) + 5.0) / 0.01));
+                if (idx_val < 0) idx_val = 0;
+                if (idx_val > static_cast<int>(N) - 1) idx_val = static_cast<int>(N) - 1;
+                f.slice(h).row(k) = f_star.slice(h).row(idx_val);
             }
         }
         
         draw_beta(beta_new, beta, X, y, f, beta_prior_means, beta_prior_sds, 
                   thresholds, obs_persons, ws_pool);
-        beta = beta_new;  // Copy result back
+        
+        // FIX: Use swap instead of copy
+        beta.swap(beta_new);
         
         // Update mu
         for (arma::uword h = 0; h < horizon; h++){
@@ -247,7 +263,9 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
 
         draw_threshold(thresholds_new, thresholds, y, f, mu, constant_IRF, 
                        obs_persons, obs_persons_combined, ws_pool);
-        thresholds = thresholds_new;  // Copy result back
+        
+        // FIX: Use swap instead of copy
+        thresholds.swap(thresholds_new);
         
         // Compute log likelihood
         double ll = 0;
@@ -259,14 +277,15 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             }
         }
 
-        if (iter>=burn_iterations && iter%THIN == 0){
-            int store_idx = int((iter-burn_iterations)/THIN);
-            theta_draws.row(store_idx)     = theta;
-            f_draws[store_idx]             = f;
-            beta_draws[store_idx]          = beta;
-            threshold_draws[store_idx]     = thresholds;
-            fstar_draws[store_idx]         = f_star;
-            ll_draws[store_idx]            = ll;
+        if (iter >= burn_iterations && iter % THIN == 0){
+            int store_idx = int((iter - burn_iterations) / THIN);
+            theta_draws.row(store_idx) = theta;
+            // FIX: Copy into pre-allocated storage instead of assigning new cubes
+            f_draws(store_idx) = f;
+            beta_draws(store_idx) = beta;
+            threshold_draws(store_idx) = thresholds;
+            fstar_draws(store_idx) = f_star;
+            ll_draws(store_idx) = ll;
         }
     }
     Rprintf("\r100.000 %% complete\n");
