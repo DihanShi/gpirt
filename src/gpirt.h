@@ -152,7 +152,7 @@ struct Workspace {
 // Thread workspace pool - manages per-thread workspaces
 class WorkspacePool {
 private:
-    std::vector<std::unique_ptr<Workspace>> workspaces;
+    std::vector<Workspace*> workspaces;
     arma::uword max_n, max_m, horizon;
     
 public:
@@ -160,8 +160,15 @@ public:
         : max_n(n), max_m(m), horizon(h) {
         workspaces.reserve(num_threads);
         for (int i = 0; i < num_threads; ++i) {
-            workspaces.push_back(std::make_unique<Workspace>(n, m, h));
+            workspaces.push_back(new Workspace(n, m, h));
         }
+    }
+    
+    ~WorkspacePool() {
+        for (size_t i = 0; i < workspaces.size(); ++i) {
+            delete workspaces[i];
+        }
+        workspaces.clear();
     }
     
     // Prevent copies
