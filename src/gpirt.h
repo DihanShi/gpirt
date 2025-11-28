@@ -47,21 +47,30 @@ Rcpp::NumericVector get_seed_state();
 
 // Cache structure for Cholesky decompositions
 struct CholeskyCache {
-    arma::cube L;           // Cholesky factors
+    arma::cube L;           // Cholesky factors for spatial covariance
     arma::cube L_time;      // Time covariance Cholesky factors
     arma::mat theta_hash;   // Hash of theta values used for L
     bool needs_update;       // Flag for update needed
     
     CholeskyCache(arma::uword n, arma::uword horizon) : 
-        L(n, n, horizon), 
-        L_time(horizon, horizon, n),
-        theta_hash(n, horizon), 
+        L(n, n, horizon, arma::fill::zeros), 
+        L_time(horizon, horizon, n, arma::fill::zeros),
+        theta_hash(n, horizon, arma::fill::zeros), 
         needs_update(true) {}
+    
+    // Prevent accidental copies
+    CholeskyCache(const CholeskyCache&) = delete;
+    CholeskyCache& operator=(const CholeskyCache&) = delete;
+    
+    // Allow moves
+    CholeskyCache(CholeskyCache&&) = default;
+    CholeskyCache& operator=(CholeskyCache&&) = default;
 };
 
 // Memory workspace for avoiding allocations - per thread
+// All vectors are pre-allocated to maximum expected sizes
 struct Workspace {
-    // For ESS functions
+    // For ESS functions - pre-allocated to max sizes
     arma::vec nu;
     arma::vec f_prime;
     arma::vec theta_prime;
@@ -84,49 +93,66 @@ struct Workspace {
     arma::vec result_col;
     arma::mat X_obs;
     arma::mat cholS_small;
-    arma::cube f_h;
-    arma::cube y_h;
-    arma::cube mu_h;
     
     // Thread-safe RNG
     ThreadRNG rng;
     
+    // Maximum dimensions stored for bounds checking
+    arma::uword max_n;
+    arma::uword max_m;
+    arma::uword max_horizon;
+    
     // Initialize with maximum expected sizes
-    Workspace(arma::uword max_n, arma::uword max_m, arma::uword horizon) :
-        nu(max_n * horizon), f_prime(max_n * horizon), theta_prime(horizon),
-        beta_prime(3), delta_prime(10), // assuming max 10 categories
-        g(max_n * horizon), f_obs(max_n * horizon), mu_obs(max_n * horizon), y_obs(max_n * horizon),
-        tmp_mat(max_n * horizon, 1001), tmp_vec(max_n * horizon),
-        alpha(max_n * horizon), draw_mean(1001),
-        result_col(max_n * horizon),
-        X_obs(max_n * horizon, 3),
-        cholS_small(3, 3),
-        f_h(max_n, 1, 1),
-        y_h(max_n, 1, 1),
-        mu_h(max_n, 1, 1) {}
+    Workspace(arma::uword n, arma::uword m, arma::uword horizon) :
+        nu(n * horizon, arma::fill::zeros), 
+        f_prime(n * horizon, arma::fill::zeros), 
+        theta_prime(horizon, arma::fill::zeros),
+        beta_prime(3, arma::fill::zeros), 
+        delta_prime(20, arma::fill::zeros), // assuming max 20 categories
+        g(n * horizon, arma::fill::zeros), 
+        f_obs(n * horizon, arma::fill::zeros), 
+        mu_obs(n * horizon, arma::fill::zeros), 
+        y_obs(n * horizon, arma::fill::zeros),
+        tmp_mat(n * horizon, 1001, arma::fill::zeros), 
+        tmp_vec(n * horizon, arma::fill::zeros),
+        alpha(n * horizon, arma::fill::zeros), 
+        draw_mean(1001, arma::fill::zeros),
+        result_col(n * horizon, arma::fill::zeros),
+        X_obs(n * horizon, 3, arma::fill::zeros),
+        cholS_small(3, 3, arma::fill::zeros),
+        max_n(n), max_m(m), max_horizon(horizon) {}
         
-    // Copy constructor for creating thread-local copies
-    Workspace(const Workspace& other) :
-        nu(other.nu.n_elem), f_prime(other.f_prime.n_elem), 
-        theta_prime(other.theta_prime.n_elem),
-        beta_prime(other.beta_prime.n_elem), delta_prime(other.delta_prime.n_elem),
-        g(other.g.n_elem), f_obs(other.f_obs.n_elem), 
-        mu_obs(other.mu_obs.n_elem), y_obs(other.y_obs.n_elem),
-        tmp_mat(other.tmp_mat.n_rows, other.tmp_mat.n_cols), 
-        tmp_vec(other.tmp_vec.n_elem),
-        alpha(other.alpha.n_elem), draw_mean(other.draw_mean.n_elem),
-        result_col(other.result_col.n_elem),
-        X_obs(other.X_obs.n_rows, other.X_obs.n_cols),
-        cholS_small(other.cholS_small.n_rows, other.cholS_small.n_cols),
-        f_h(other.f_h.n_rows, other.f_h.n_cols, other.f_h.n_slices),
-        y_h(other.y_h.n_rows, other.y_h.n_cols, other.y_h.n_slices),
-        mu_h(other.mu_h.n_rows, other.mu_h.n_cols, other.mu_h.n_slices) {}
+    // Deleted copy constructor to prevent accidental copies
+    Workspace(const Workspace&) = delete;
+    Workspace& operator=(const Workspace&) = delete;
+    
+    // Move constructor
+    Workspace(Workspace&& other) noexcept :
+        nu(std::move(other.nu)), 
+        f_prime(std::move(other.f_prime)), 
+        theta_prime(std::move(other.theta_prime)),
+        beta_prime(std::move(other.beta_prime)), 
+        delta_prime(std::move(other.delta_prime)),
+        g(std::move(other.g)), 
+        f_obs(std::move(other.f_obs)), 
+        mu_obs(std::move(other.mu_obs)), 
+        y_obs(std::move(other.y_obs)),
+        tmp_mat(std::move(other.tmp_mat)), 
+        tmp_vec(std::move(other.tmp_vec)),
+        alpha(std::move(other.alpha)), 
+        draw_mean(std::move(other.draw_mean)),
+        result_col(std::move(other.result_col)),
+        X_obs(std::move(other.X_obs)),
+        cholS_small(std::move(other.cholS_small)),
+        max_n(other.max_n), max_m(other.max_m), max_horizon(other.max_horizon) {}
+    
+    Workspace& operator=(Workspace&&) = default;
 };
 
-// Thread workspace pool
+// Thread workspace pool - manages per-thread workspaces
 class WorkspacePool {
 private:
-    std::vector<Workspace> workspaces;
+    std::vector<std::unique_ptr<Workspace>> workspaces;
     arma::uword max_n, max_m, horizon;
     
 public:
@@ -134,22 +160,26 @@ public:
         : max_n(n), max_m(m), horizon(h) {
         workspaces.reserve(num_threads);
         for (int i = 0; i < num_threads; ++i) {
-            workspaces.emplace_back(n, m, h);
+            workspaces.push_back(std::make_unique<Workspace>(n, m, h));
         }
     }
     
+    // Prevent copies
+    WorkspacePool(const WorkspacePool&) = delete;
+    WorkspacePool& operator=(const WorkspacePool&) = delete;
+    
     void seed_all(unsigned int base_seed) {
         for (size_t i = 0; i < workspaces.size(); ++i) {
-            workspaces[i].rng.seed(base_seed + static_cast<unsigned int>(i) * 1000);
+            workspaces[i]->rng.seed(base_seed + static_cast<unsigned int>(i) * 1000);
         }
     }
     
     Workspace& get(int thread_id) {
-        return workspaces[thread_id];
+        return *workspaces[thread_id];
     }
     
     Workspace& get_single() {
-        return workspaces[0];
+        return *workspaces[0];
     }
     
     int size() const {
@@ -245,13 +275,11 @@ double ll_bar_sparse(const arma::vec& f, const arma::vec& y,
                      const arma::vec& mu, const arma::vec& thresholds,
                      const arma::uvec& obs_idx);
 
-// convertion between thresholds and delta thresholds
+// Conversion between thresholds and delta thresholds
 arma::vec delta_to_threshold(const arma::vec& deltas);
 arma::vec threshold_to_delta(const arma::vec& thresholds);
 
-// cholesky decomposition
+// Cholesky decomposition utilities
 arma::mat double_solve(const arma::mat& L, const arma::mat& X);
-arma::mat compress_toeplitz(arma::mat& T);
-arma::mat toep_cholesky_lower(arma::mat& T);
 
 #endif // GPIRT_H

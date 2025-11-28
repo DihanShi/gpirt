@@ -15,7 +15,8 @@ void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
     // Check if theta has changed significantly
     double theta_change = arma::norm(cache.theta_hash - theta, "fro");
     
-    // Only update if theta has changed by more than threshold (0.01 for performance)
+    // Only update if theta has changed by more than threshold
+    // Using 0.01 threshold for performance balance
     if (theta_change > 0.01 || cache.needs_update) {
         arma::uword n = theta.n_rows;
         arma::uword horizon = theta.n_cols;
@@ -27,8 +28,8 @@ void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
             cache.L.slice(h) = arma::chol(S, "lower");
         }
         
-        // Update time Cholesky factors if needed
-        if (ls > 0.1 && ls < 3*horizon) {
+        // Update time Cholesky factors if needed (GP over time)
+        if (ls > 0.1 && ls < 3.0 * static_cast<double>(horizon)) {
             arma::vec ts = arma::linspace<arma::vec>(0, horizon-1, horizon);
             for (arma::uword i = 0; i < n; ++i) {
                 arma::mat V = K_time(ts, ts, os, ls, 
@@ -38,7 +39,7 @@ void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
             }
         }
         
-        // Update hash and flag
+        // Update hash and clear flag
         cache.theta_hash = theta;
         cache.needs_update = false;
     }

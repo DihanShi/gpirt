@@ -60,7 +60,7 @@ Rcpp::List recover_fstar(int seed,
     X.col(1) = theta;
 
     // set up mu
-    arma::cube mu(n,m,horizon);
+    arma::cube mu(n, m, horizon);
     for (arma::uword h = 0; h < horizon; h++){
         mu.slice(h) = X.slice(h) * beta.slice(h);
     }

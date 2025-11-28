@@ -40,7 +40,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::uword m = y.n_cols;
     arma::uword horizon = y.n_slices;
     int total_iterations = sample_iterations + burn_iterations;
-    int n_stored = int(sample_iterations/THIN);
+    arma::uword C = thresholds.n_cols;
 
     // Get number of threads
     int num_threads = get_num_threads();
@@ -82,7 +82,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
                 all_obs(pos++) = h_obs(k) + h * n;
             }
         }
-        obs_persons_combined(j, 0) = std::move(all_obs);
+        obs_persons_combined(j, 0) = all_obs;
     }
 
     double avg_obs = arma::mean(arma::vectorise(n_obs));
@@ -174,34 +174,48 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         mu_star.slice(h) = Xstar * beta.slice(h);
     }
     
-    // Pre-allocate working arrays that will be reused each iteration
-    // FIX: These are now allocated ONCE outside the loop
+    // Pre-allocate ALL working arrays ONCE - this is critical for memory stability
     arma::cube f_star(N, m, horizon);
     arma::cube f_new(n, m, horizon);
     arma::mat theta_new(n, horizon);
     arma::cube beta_new(3, m, horizon);
-    arma::cube thresholds_new(m, thresholds.n_cols, horizon);
+    arma::cube thresholds_new(m, C, horizon);
+    
+    // Pre-allocate index matrix for theta lookups
+    arma::mat idx(n, horizon);
     
     // Initial f_star draw
     draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
     Rcpp::Rcout << "start running gpirtMCMC...\n";
 
-    // Setup results storage - PRE-ALLOCATE all storage upfront
-    // FIX: Use fixed-size arrays instead of growing fields
-    arma::cube theta_draws(n_stored, n, horizon);
-    arma::field<arma::cube> beta_draws(n_stored);
-    arma::field<arma::cube> f_draws(n_stored);
-    arma::field<arma::cube> fstar_draws(n_stored);
-    arma::field<arma::cube> threshold_draws(n_stored);
-    arma::vec ll_draws(n_stored);
+    // Setup results storage - use pre-allocated 4D arrays instead of field<cube>
+    // This avoids repeated heap allocations for each iteration
+    int n_samples = int(sample_iterations/THIN);
     
-    // Pre-allocate the cubes in the fields to avoid repeated allocation
-    for (int i = 0; i < n_stored; ++i) {
-        beta_draws(i) = arma::cube(3, m, horizon);
-        f_draws(i) = arma::cube(n, m, horizon);
-        fstar_draws(i) = arma::cube(N, m, horizon);
-        threshold_draws(i) = arma::cube(m, thresholds.n_cols, horizon);
-    }
+    // For theta: 3D array (samples x n x horizon)
+    arma::cube theta_draws(n_samples, n, horizon);
+    
+    // For beta, f, fstar, thresholds: Use vectors of pre-sized cubes
+    // But store only what we need - consider if all samples are needed
+    // FIX: Use contiguous memory blocks instead of field<cube>
+    
+    // Option 1: Store only final results and running statistics (recommended for large data)
+    // Option 2: Pre-allocate all storage upfront
+    
+    // Using Option 2 with careful memory management:
+    // Allocate as 4D tensors stored as vectors of cubes
+    std::vector<arma::cube> beta_draws_vec;
+    std::vector<arma::cube> f_draws_vec;
+    std::vector<arma::cube> fstar_draws_vec;
+    std::vector<arma::cube> threshold_draws_vec;
+    
+    // Reserve capacity to avoid reallocations
+    beta_draws_vec.reserve(n_samples);
+    f_draws_vec.reserve(n_samples);
+    fstar_draws_vec.reserve(n_samples);
+    threshold_draws_vec.reserve(n_samples);
+    
+    arma::vec ll_draws(n_samples);
 
     double progress_increment = (1.0 / total_iterations) * 100.0;
     double progress = 0.0;
@@ -215,60 +229,67 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         // Seed all thread RNGs with iteration-based seeds for reproducibility
         ws_pool.seed_all(static_cast<unsigned int>(iter * 10000));
 
-        // Draw with cached Cholesky and workspace pool - using output references
-        // FIX: Reuse pre-allocated arrays instead of creating new ones
+        // Draw f - reuse pre-allocated f_new
         draw_f(f_new, f, theta, y, chol_cache, beta_prior_sds, mu, thresholds, 
                constant_IRF, obs_persons, obs_persons_combined, ws_pool);
         
-        // FIX: Use swap instead of copy to avoid allocation
+        // Swap instead of copy to avoid memory allocation
         f.swap(f_new);
         
+        // Draw fstar - reuse pre-allocated f_star
         draw_fstar(f_star, f, theta, theta_star, beta_prior_sds, chol_cache, mu_star, constant_IRF, ws_pool);
         
+        // Draw theta - reuse pre-allocated theta_new
         draw_theta(theta_new, theta_star, y, theta, theta_prior_sds, f_star, 
                    mu_star, thresholds, theta_os, theta_ls, KERNEL, obs_items, chol_cache, ws_pool);
         
-        // FIX: Use swap instead of copy
+        // Swap instead of copy
         theta.swap(theta_new);
         
-        // update X from theta
+        // update X from theta (in-place)
         X.col(1) = theta;
         X.col(2) = arma::pow(theta, 2);
 
-        // Update f for new theta - use direct indexing without creating idx matrix
+        // Update f for new theta - compute idx once, reuse
+        idx = (theta + 5.0) / 0.01;
         for (arma::uword k = 0; k < n; ++k){
             for (arma::uword h = 0; h < horizon; ++h){
-                int idx_val = static_cast<int>(round((theta(k, h) + 5.0) / 0.01));
-                if (idx_val < 0) idx_val = 0;
-                if (idx_val > static_cast<int>(N) - 1) idx_val = static_cast<int>(N) - 1;
+                int idx_val = static_cast<int>(std::round(idx(k, h)));
+                idx_val = std::max(0, std::min(idx_val, static_cast<int>(N-1)));
                 f.slice(h).row(k) = f_star.slice(h).row(idx_val);
             }
         }
         
+        // Draw beta - reuse pre-allocated beta_new
         draw_beta(beta_new, beta, X, y, f, beta_prior_means, beta_prior_sds, 
                   thresholds, obs_persons, ws_pool);
         
-        // FIX: Use swap instead of copy
+        // Swap instead of copy
         beta.swap(beta_new);
         
-        // Update mu
+        // Update mu (in-place operations)
         for (arma::uword h = 0; h < horizon; h++){
             mu.slice(h) = X.slice(h) * beta.slice(h);
             mu_star.slice(h) = Xstar * beta.slice(h);
         }
         
-        // Mark cache for update (theta has changed)
-        chol_cache.needs_update = true;
-        update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+        // Only update cache when theta has actually changed significantly
+        // Check if update is needed based on theta change
+        double theta_change = arma::norm(chol_cache.theta_hash - theta, "fro");
+        if (theta_change > 0.01) {
+            chol_cache.needs_update = true;
+            update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+        }
 
+        // Draw thresholds - reuse pre-allocated thresholds_new
         draw_threshold(thresholds_new, thresholds, y, f, mu, constant_IRF, 
                        obs_persons, obs_persons_combined, ws_pool);
         
-        // FIX: Use swap instead of copy
+        // Swap instead of copy
         thresholds.swap(thresholds_new);
         
         // Compute log likelihood
-        double ll = 0;
+        double ll = 0.0;
         for (arma::uword h = 0; h < horizon; h++){
             for (arma::uword j = 0; j < m; j++) {
                 ll += ll_bar_sparse(f.slice(h).col(j), y.slice(h).col(j),
@@ -277,24 +298,58 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             }
         }
 
+        // Store results only after burn-in and at THIN intervals
         if (iter >= burn_iterations && iter % THIN == 0){
-            int store_idx = int((iter - burn_iterations) / THIN);
-            theta_draws.row(store_idx) = theta;
-            // FIX: Copy into pre-allocated storage instead of assigning new cubes
-            f_draws(store_idx) = f;
-            beta_draws(store_idx) = beta;
-            threshold_draws(store_idx) = thresholds;
-            fstar_draws(store_idx) = f_star;
+            int store_idx = (iter - burn_iterations) / THIN;
+            
+            // Store theta directly (it's just a matrix per slice)
+            for (arma::uword h = 0; h < horizon; ++h) {
+                theta_draws.slice(h).row(store_idx) = theta.col(h).t();
+            }
+            
+            // For cubes, make explicit copies to storage
+            // Using emplace_back with copy to avoid temporary
+            beta_draws_vec.emplace_back(beta);
+            f_draws_vec.emplace_back(f);
+            fstar_draws_vec.emplace_back(f_star);
+            threshold_draws_vec.emplace_back(thresholds);
+            
             ll_draws(store_idx) = ll;
         }
     }
     Rprintf("\r100.000 %% complete\n");
 
-    Rcpp::List result = Rcpp::List::create(Rcpp::Named("theta", theta_draws),
-                                           Rcpp::Named("f", f_draws),
-                                           Rcpp::Named("beta", beta_draws),
-                                           Rcpp::Named("fstar", fstar_draws),
-                                           Rcpp::Named("threshold", threshold_draws),
-                                           Rcpp::Named("ll", ll_draws));
+    // Convert vectors to Rcpp Lists for return
+    Rcpp::List f_draws_list(n_samples);
+    Rcpp::List beta_draws_list(n_samples);
+    Rcpp::List fstar_draws_list(n_samples);
+    Rcpp::List threshold_draws_list(n_samples);
+    
+    for (int i = 0; i < n_samples; ++i) {
+        f_draws_list[i] = Rcpp::wrap(f_draws_vec[i]);
+        beta_draws_list[i] = Rcpp::wrap(beta_draws_vec[i]);
+        fstar_draws_list[i] = Rcpp::wrap(fstar_draws_vec[i]);
+        threshold_draws_list[i] = Rcpp::wrap(threshold_draws_vec[i]);
+    }
+    
+    // Clear vectors to free memory before creating result
+    f_draws_vec.clear();
+    f_draws_vec.shrink_to_fit();
+    beta_draws_vec.clear();
+    beta_draws_vec.shrink_to_fit();
+    fstar_draws_vec.clear();
+    fstar_draws_vec.shrink_to_fit();
+    threshold_draws_vec.clear();
+    threshold_draws_vec.shrink_to_fit();
+
+    Rcpp::List result = Rcpp::List::create(
+        Rcpp::Named("theta", theta_draws),
+        Rcpp::Named("f", f_draws_list),
+        Rcpp::Named("beta", beta_draws_list),
+        Rcpp::Named("fstar", fstar_draws_list),
+        Rcpp::Named("threshold", threshold_draws_list),
+        Rcpp::Named("ll", ll_draws)
+    );
+    
     return result;
 }
