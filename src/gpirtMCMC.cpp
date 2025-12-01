@@ -33,7 +33,9 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
                      const double& theta_ls,
                      const std::string& KERNEL,
                      arma::cube thresholds,
-                     const int constant_IRF) {
+                     const int constant_IRF,
+                     const bool store_f = false,
+                     const bool store_fstar = false) {
 
     // Bookkeeping variables
     arma::uword n = y.n_rows;
@@ -41,6 +43,43 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     arma::uword horizon = y.n_slices;
     int total_iterations = sample_iterations + burn_iterations;
     arma::uword C = thresholds.n_cols;
+    
+    // Memory estimation
+    int n_samples = int(sample_iterations/THIN);
+    double bytes_per_mb = 1024.0 * 1024.0;
+    double theta_mb = (n_samples * n * horizon * 8.0) / bytes_per_mb;
+    double beta_mb = (n_samples * 3 * m * horizon * 8.0) / bytes_per_mb;
+    double f_mb = (n_samples * n * m * horizon * 8.0) / bytes_per_mb;
+    double fstar_mb = (n_samples * 1001 * m * horizon * 8.0) / bytes_per_mb;
+    double threshold_mb = (n_samples * m * C * horizon * 8.0) / bytes_per_mb;
+    
+    double total_mb = theta_mb + beta_mb + threshold_mb;
+    if (store_f) total_mb += f_mb;
+    if (store_fstar) total_mb += fstar_mb;
+    
+    Rcpp::Rcout << "\n=== MEMORY ESTIMATE ===\n";
+    Rcpp::Rcout << "Samples to store: " << n_samples << " (thinned from " << sample_iterations << ")\n";
+    Rcpp::Rcout << "Theta samples:     " << theta_mb << " MB\n";
+    Rcpp::Rcout << "Beta samples:      " << beta_mb << " MB\n";
+    if (store_f) {
+        Rcpp::Rcout << "F samples:         " << f_mb << " MB (ENABLED)\n";
+    } else {
+        Rcpp::Rcout << "F samples:         " << f_mb << " MB (DISABLED - will skip)\n";
+    }
+    if (store_fstar) {
+        Rcpp::Rcout << "Fstar samples:     " << fstar_mb << " MB (ENABLED)\n";
+    } else {
+        Rcpp::Rcout << "Fstar samples:     " << fstar_mb << " MB (DISABLED - will skip)\n";
+    }
+    Rcpp::Rcout << "Threshold samples: " << threshold_mb << " MB\n";
+    Rcpp::Rcout << "TOTAL ESTIMATED:   " << total_mb << " MB (" << (total_mb/1024.0) << " GB)\n";
+    
+    if (total_mb > 10000) {
+        Rcpp::Rcout << "\nWARNING: Estimated memory usage exceeds 10 GB!\n";
+        Rcpp::Rcout << "Consider: (1) Increase THIN parameter, (2) Reduce sample_iterations\n";
+        Rcpp::Rcout << "          (3) Set store_f=FALSE, (4) Set store_fstar=FALSE\n\n";
+    }
+    Rcpp::Rcout << "========================\n\n";
 
     // Get number of threads
     int num_threads = get_num_threads();
@@ -192,18 +231,10 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     // This avoids repeated heap allocations for each iteration
     int n_samples = int(sample_iterations/THIN);
     
-    // For theta: 3D array (samples x n x horizon)
+    // For theta: 3D array (samples x n x horizon) - ALWAYS store
     arma::cube theta_draws(n_samples, n, horizon);
     
-    // For beta, f, fstar, thresholds: Use vectors of pre-sized cubes
-    // But store only what we need - consider if all samples are needed
-    // FIX: Use contiguous memory blocks instead of field<cube>
-    
-    // Option 1: Store only final results and running statistics (recommended for large data)
-    // Option 2: Pre-allocate all storage upfront
-    
-    // Using Option 2 with careful memory management:
-    // Allocate as 4D tensors stored as vectors of cubes
+    // Conditional storage based on user preferences
     std::vector<arma::cube> beta_draws_vec;
     std::vector<arma::cube> f_draws_vec;
     std::vector<arma::cube> fstar_draws_vec;
@@ -211,9 +242,15 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     
     // Reserve capacity to avoid reallocations
     beta_draws_vec.reserve(n_samples);
-    f_draws_vec.reserve(n_samples);
-    fstar_draws_vec.reserve(n_samples);
     threshold_draws_vec.reserve(n_samples);
+    
+    // Only reserve if we're storing these large arrays
+    if (store_f) {
+        f_draws_vec.reserve(n_samples);
+    }
+    if (store_fstar) {
+        fstar_draws_vec.reserve(n_samples);
+    }
     
     arma::vec ll_draws(n_samples);
 
@@ -307,12 +344,17 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
                 theta_draws.slice(h).row(store_idx) = theta.col(h).t();
             }
             
-            // For cubes, make explicit copies to storage
-            // Using emplace_back with copy to avoid temporary
+            // Always store beta and thresholds (relatively small)
             beta_draws_vec.emplace_back(beta);
-            f_draws_vec.emplace_back(f);
-            fstar_draws_vec.emplace_back(f_star);
             threshold_draws_vec.emplace_back(thresholds);
+            
+            // Conditionally store large arrays
+            if (store_f) {
+                f_draws_vec.emplace_back(f);
+            }
+            if (store_fstar) {
+                fstar_draws_vec.emplace_back(f_star);
+            }
             
             ll_draws(store_idx) = ll;
         }
@@ -320,27 +362,41 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     Rprintf("\r100.000 %% complete\n");
 
     // Convert vectors to Rcpp Lists for return
-    Rcpp::List f_draws_list(n_samples);
     Rcpp::List beta_draws_list(n_samples);
-    Rcpp::List fstar_draws_list(n_samples);
     Rcpp::List threshold_draws_list(n_samples);
     
     for (int i = 0; i < n_samples; ++i) {
-        f_draws_list[i] = Rcpp::wrap(f_draws_vec[i]);
         beta_draws_list[i] = Rcpp::wrap(beta_draws_vec[i]);
-        fstar_draws_list[i] = Rcpp::wrap(fstar_draws_vec[i]);
         threshold_draws_list[i] = Rcpp::wrap(threshold_draws_vec[i]);
     }
     
-    // Clear vectors to free memory before creating result
-    f_draws_vec.clear();
-    f_draws_vec.shrink_to_fit();
+    // Clear beta and threshold vectors
     beta_draws_vec.clear();
     beta_draws_vec.shrink_to_fit();
-    fstar_draws_vec.clear();
-    fstar_draws_vec.shrink_to_fit();
     threshold_draws_vec.clear();
     threshold_draws_vec.shrink_to_fit();
+    
+    // Conditionally convert f and fstar
+    Rcpp::List f_draws_list = R_NilValue;
+    Rcpp::List fstar_draws_list = R_NilValue;
+    
+    if (store_f) {
+        f_draws_list = Rcpp::List(n_samples);
+        for (int i = 0; i < n_samples; ++i) {
+            f_draws_list[i] = Rcpp::wrap(f_draws_vec[i]);
+        }
+        f_draws_vec.clear();
+        f_draws_vec.shrink_to_fit();
+    }
+    
+    if (store_fstar) {
+        fstar_draws_list = Rcpp::List(n_samples);
+        for (int i = 0; i < n_samples; ++i) {
+            fstar_draws_list[i] = Rcpp::wrap(fstar_draws_vec[i]);
+        }
+        fstar_draws_vec.clear();
+        fstar_draws_vec.shrink_to_fit();
+    }
 
     Rcpp::List result = Rcpp::List::create(
         Rcpp::Named("theta", theta_draws),

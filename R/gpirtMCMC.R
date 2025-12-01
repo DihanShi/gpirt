@@ -104,7 +104,9 @@ gpirtMCMC <- function(data, sample_iterations, burn_iterations,
                       theta_prior_means = matrix(0, nrow = 2, ncol = nrow(data)),
                       theta_prior_sds = matrix(0, nrow = 2, ncol = nrow(data)),
                       theta_os = 1, theta_ls = 10, KERNEL = "Matern",
-                      theta_init = NULL, thresholds = NULL, SEED=1, constant_IRF=0) {
+                      theta_init = NULL, thresholds = NULL, SEED=1, constant_IRF=0,
+                      store_f = FALSE,
+                      store_fstar = FALSE) {
     # Setup result list for multiple chains
     result = list()
     for(chain in 1:CHAIN){
@@ -157,7 +159,7 @@ gpirtMCMC <- function(data, sample_iterations, burn_iterations,
             data, theta_init, sample_iterations, burn_iterations, THIN,
             beta_prior_means, beta_prior_sds,
             theta_prior_means, theta_prior_sds,
-            theta_os, theta_ls, KERNEL, thresholds, constant_IRF
+            theta_os, theta_ls, KERNEL, thresholds, constant_IRF, store_f, store_fstar
         )
     }
     # And return the result
