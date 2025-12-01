@@ -11,7 +11,6 @@ inline void ess_threshold_sparse_threadsafe(arma::vec& out,
                                             arma::uword j_idx,
                                             Workspace& ws) {
     arma::uword C = delta.n_elem + 1;
-    arma::uword horizon = y.n_slices;
     arma::uword n = y.n_rows;
     
     // Build Cholesky for prior (identity covariance)

@@ -5,10 +5,11 @@
 \title{Gaussian Process Recover IRT}
 \usage{
 recover_fstar(
-  seed_state,
+  seed,
   f,
   y,
   theta,
+  beta,
   thresholds,
   beta_prior_means = matrix(0, nrow = 2, ncol = ncol(y)),
   beta_prior_sds = matrix(0.5, nrow = 2, ncol = ncol(y)),
@@ -16,7 +17,7 @@ recover_fstar(
 )
 }
 \arguments{
-\item{seed_state}{An integer vector of length 625.}
+\item{seed}{An integer giving random seed.}
 
 \item{f}{A matrix of latent function values of shape n by m by h, where
 n is number of respondents, m is number of items per session, and
@@ -27,6 +28,9 @@ IRFs and h sessions}
 
 \item{theta}{A matrix of shape n by h, giving initial values
 for the respondent ideology parameters}
+
+\item{beta}{A tensor of shape 2 by n by h, giving intercept/slope
+for the mean values of IRF}
 
 \item{thresholds}{A vector of length C+1, giving threshold vector}
 

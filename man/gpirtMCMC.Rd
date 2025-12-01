@@ -11,14 +11,19 @@ gpirtMCMC(
   THIN = 1,
   CHAIN = 1,
   vote_codes = list(yea = 1:3, nay = 4:6, missing = c(0, 7:9, NA)),
-  beta_prior_means = matrix(0, nrow = 2, ncol = ncol(data)),
-  beta_prior_sds = matrix(3, nrow = 2, ncol = ncol(data)),
+  beta_prior_means = matrix(0, nrow = 3, ncol = ncol(data)),
+  beta_prior_sds = matrix(3, nrow = 3, ncol = ncol(data)),
+  theta_prior_means = matrix(0, nrow = 2, ncol = nrow(data)),
+  theta_prior_sds = matrix(0, nrow = 2, ncol = nrow(data)),
   theta_os = 1,
   theta_ls = 10,
+  KERNEL = "Matern",
   theta_init = NULL,
   thresholds = NULL,
   SEED = 1,
-  constant_IRF = 0
+  constant_IRF = 0,
+  store_f = FALSE,
+  store_fstar = FALSE
 )
 }
 \arguments{
@@ -51,6 +56,12 @@ and slope; by default, a matrix of zeros}
 \item{beta_prior_sds}{A numeric matrix of with \code{ncol(data)} columns
 and two rows giving the prior standard deviations for the items' linear
 means' intercept and slope; by default, a matrix of threes}
+
+\item{theta_prior_means}{A numeric  matrix of with \code{ncol(data)} columns
+giving the prior mean of theta by default, a  matrix of zeros}
+
+\item{theta_prior_sds}{A numeric  matrix of with \code{ncol(data)} columns
+giving sd of prior variance constant theta; by default, a  matrix of ones}
 
 \item{theta_os}{A numeric value giving output scale of dynamic ability GP model}
 

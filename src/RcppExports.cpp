@@ -37,7 +37,6 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-
 // recover_fstar
 Rcpp::List recover_fstar(int seed, arma::cube f, const arma::cube& y, const arma::mat& theta, const arma::cube& beta, const arma::cube& thresholds, const arma::mat& beta_prior_means, const arma::mat& beta_prior_sds, const int constant_IRF);
 RcppExport SEXP _gpirt_recover_fstar(SEXP seedSEXP, SEXP fSEXP, SEXP ySEXP, SEXP thetaSEXP, SEXP betaSEXP, SEXP thresholdsSEXP, SEXP beta_prior_meansSEXP, SEXP beta_prior_sdsSEXP, SEXP constant_IRFSEXP) {
