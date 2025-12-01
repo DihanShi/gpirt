@@ -229,7 +229,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
 
     // Setup results storage - use pre-allocated 4D arrays instead of field<cube>
     // This avoids repeated heap allocations for each iteration
-    int n_samples = int(sample_iterations/THIN);
+    // n_samples already declared above for memory estimation
     
     // For theta: 3D array (samples x n x horizon) - ALWAYS store
     arma::cube theta_draws(n_samples, n, horizon);
