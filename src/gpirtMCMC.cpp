@@ -310,13 +310,8 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
             mu_star.slice(h) = Xstar * beta.slice(h);
         }
         
-        // Only update cache when theta has actually changed significantly
-        // Check if update is needed based on theta change
-        double theta_change = arma::norm(chol_cache.theta_hash - theta, "fro");
-        if (theta_change > 0.01) {
-            chol_cache.needs_update = true;
-            update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
-        }
+        // Always update Cholesky cache after theta changes
+        update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
 
         // Draw thresholds - reuse pre-allocated thresholds_new
         draw_threshold(thresholds_new, thresholds, y, f, mu, constant_IRF, 
