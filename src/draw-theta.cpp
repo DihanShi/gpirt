@@ -7,8 +7,7 @@ inline double compute_ll_sparse(const double theta,
                                 const arma::mat& mu_star,
                                 const arma::mat& thresholds,
                                 const arma::uvec& obs_idx){
-    // Coarse 0.1 grid spacing: multiply by 10 to index into original theta_star array
-    int theta_index = static_cast<int>(std::round((theta + 5.0) / 0.1)) * 10;
+    int theta_index = static_cast<int>(std::round((theta + 5.0) / 0.01));
     theta_index = std::max(0, std::min(theta_index, 1000));
     
     double result = 0.0;
@@ -163,7 +162,7 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
                 L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                 
             // Map to grid
-            int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.1)) * 10;
+            int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.01));
             idx = std::max(0, std::min(idx, static_cast<int>(N-1)));
             for (arma::uword h = 0; h < horizon; ++h){
                 result(i, h) = theta_star(idx);
@@ -199,7 +198,7 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
                     L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
                     
                 // Map to grid
-                int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.1)) * 10;
+                int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.01));
                 idx = std::max(0, std::min(idx, static_cast<int>(N-1)));
                 result(i, h) = theta_star(idx);
             }
@@ -229,7 +228,7 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
                 
             for (arma::uword h = 0; h < horizon; ++h){
                 // Map to grid
-                int idx = static_cast<int>(std::round((raw_theta_ess(h) + 5.0) / 0.1)) * 10;
+                int idx = static_cast<int>(std::round((raw_theta_ess(h) + 5.0) / 0.01));
                 idx = std::max(0, std::min(idx, static_cast<int>(N-1)));
                 result(i, h) = theta_star(idx);
             }
