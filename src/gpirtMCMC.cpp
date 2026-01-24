@@ -133,7 +133,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
     theta.clamp(-5.0, 5.0);
 
     // Initialize and cache Cholesky decompositions
-    update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+    update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL, &theta_prior_sds);
 
     arma::cube X(n, 3, horizon);
     X.col(0) = arma::ones<arma::mat>(n, horizon);
@@ -311,7 +311,7 @@ Rcpp::List gpirtMCMC(const arma::cube& y, arma::mat theta,
         }
         
         // Always update Cholesky cache after theta changes
-        update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL);
+        update_cholesky_cache(chol_cache, theta, beta_prior_sds, theta_os, theta_ls, KERNEL, &theta_prior_sds);
 
         // Draw thresholds - reuse pre-allocated thresholds_new
         draw_threshold(thresholds_new, thresholds, y, f, mu, constant_IRF, 

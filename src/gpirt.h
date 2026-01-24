@@ -259,11 +259,17 @@ void draw_threshold(arma::cube& result, const arma::cube& thresholds, const arma
                     const arma::field<arma::uvec>& obs_persons_combined,
                     WorkspacePool& ws_pool);
 
-// Utility function to update Cholesky cache if needed
+// Utility function to update Cholesky cache.
+//
+// - Spatial factors (cache.L) depend on current theta and are updated whenever this is called.
+// - Time factors (cache.L_time) depend on (os, ls, KERNEL) and the per-respondent
+//   theta prior SDs. Pass theta_prior_sds when you want cache.L_time to incorporate
+//   respondent-specific prior hyperparameters.
 void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
                           const arma::mat& beta_prior_sds,
                           const double& os, const double& ls,
-                          const std::string& KERNEL);
+                          const std::string& KERNEL,
+                          const arma::mat* theta_prior_sds = nullptr);
 
 // Covariance function
 arma::mat K(const arma::vec& x1, const arma::vec& x2, const arma::vec& beta_prior_sds);

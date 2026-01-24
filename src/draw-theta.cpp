@@ -140,15 +140,17 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
             }
             obs_items_i(0) = all_obs;
             
-            // Build combined y, fstar, mu_star
+            // Build combined y, fstar, mu_star, thresholds
             arma::mat y_(m_total, 1);
             arma::cube fstar_(N, m_total, 1);
             arma::cube mu_star_(N, m_total, 1);
+            arma::cube thresholds_(m_total, thresholds.n_cols, 1);
             
             for(arma::uword h = 0; h < horizon; ++h) {
                 arma::uword start_idx = h * m;
                 arma::uword end_idx = (h + 1) * m - 1;
                 y_.col(0).subvec(start_idx, end_idx) = y.slice(h).row(i).t();
+                thresholds_.slice(0).rows(start_idx, end_idx) = thresholds.slice(h);
                 for(arma::uword k = 0; k < N; ++k) {
                     fstar_.slice(0).row(k).subvec(start_idx, end_idx) = fstar.slice(h).row(k);
                     mu_star_.slice(0).row(k).subvec(start_idx, end_idx) = mu_star.slice(h).row(k);
@@ -159,7 +161,7 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
             arma::vec raw_theta_ess(1);
             draw_theta_ess_sparse_threadsafe(raw_theta_ess,
                 arma::vec(1, arma::fill::value(theta(i,0))), y_,
-                L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
+                L_i, fstar_, mu_star_, thresholds_, obs_items_i, ws);
                 
             // Map to grid
             int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.01));
@@ -188,14 +190,16 @@ void draw_theta(arma::mat& result, const arma::vec& theta_star,
                 y_.col(0) = y.slice(h).row(i).t();
                 arma::cube fstar_(N, m, 1);
                 arma::cube mu_star_(N, m, 1);
+                arma::cube thresholds_(m, thresholds.n_cols, 1);
                 fstar_.slice(0) = fstar.slice(h);
                 mu_star_.slice(0) = mu_star.slice(h);
+                thresholds_.slice(0) = thresholds.slice(h);
                 
                 arma::mat L_i = arma::chol(V + std::pow(theta_prior_sds(0,i), 2), "lower");
                 arma::vec raw_theta_ess(1);
                 draw_theta_ess_sparse_threadsafe(raw_theta_ess,
                     arma::vec(1, arma::fill::value(theta(i,h))), y_,
-                    L_i, fstar_, mu_star_, thresholds, obs_items_i, ws);
+                    L_i, fstar_, mu_star_, thresholds_, obs_items_i, ws);
                     
                 // Map to grid
                 int idx = static_cast<int>(std::round((raw_theta_ess(0) + 5.0) / 0.01));

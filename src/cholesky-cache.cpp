@@ -11,7 +11,8 @@ arma::mat double_solve(const arma::mat& L, const arma::mat& X) {
 void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
                           const arma::mat& beta_prior_sds,
                           const double& os, const double& ls,
-                          const std::string& KERNEL) {
+                          const std::string& KERNEL,
+                          const arma::mat* theta_prior_sds) {
     // Always update when called
     arma::uword n = theta.n_rows;
     arma::uword horizon = theta.n_cols;
@@ -27,8 +28,14 @@ void update_cholesky_cache(CholeskyCache& cache, const arma::mat& theta,
     if (ls > 0.1 && ls < 3.0 * static_cast<double>(horizon)) {
         arma::vec ts = arma::linspace<arma::vec>(0, horizon-1, horizon);
         for (arma::uword i = 0; i < n; ++i) {
-            arma::mat V = K_time(ts, ts, os, ls, 
-                                arma::vec(2, arma::fill::zeros), KERNEL);
+            // If per-respondent theta prior SDs are supplied, use them.
+            // Otherwise, fall back to a zero vector (preserving prior behavior).
+            arma::vec sds_i(2, arma::fill::zeros);
+            if (theta_prior_sds != nullptr) {
+                // Expecting a 2 x n matrix: (intercept SD, linear SD) by respondent.
+                sds_i = theta_prior_sds->col(i);
+            }
+            arma::mat V = K_time(ts, ts, os, ls, sds_i, KERNEL);
             V.diag() += 1e-6;
             cache.L_time.slice(i) = arma::chol(V, "lower");
         }

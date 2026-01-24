@@ -54,10 +54,11 @@ Rcpp::List recover_fstar(int seed,
     // Initialize and update cache
     update_cholesky_cache(chol_cache, theta, beta_prior_sds, 0, 0, "");
 
-    // set up X
-    arma::cube X(n, 2, horizon);
+    // set up X (quadratic basis, consistent with gpirtMCMC)
+    arma::cube X(n, 3, horizon);
     X.col(0) = arma::ones<arma::mat>(n, horizon);
     X.col(1) = theta;
+    X.col(2) = arma::pow(theta, 2);
 
     // set up mu
     arma::cube mu(n, m, horizon);
@@ -68,9 +69,10 @@ Rcpp::List recover_fstar(int seed,
     // set up mu_star
     arma::vec theta_star = arma::regspace<arma::vec>(-5.0, 0.01, 5.0);
     arma::uword N = theta_star.n_elem;
-    arma::mat Xstar(N, 2);
+    arma::mat Xstar(N, 3);
     Xstar.col(0) = arma::ones<arma::vec>(N);
     Xstar.col(1) = theta_star;
+    Xstar.col(2) = arma::pow(theta_star, 2);
     arma::cube mu_star(N, m, horizon);
     for (arma::uword h = 0; h < horizon; h++){
         mu_star.slice(h) = Xstar * beta.slice(h);
